@@ -1,0 +1,452 @@
+// The floating terminal window.
+//
+// All React: one component owns open state (via the external controller),
+// geometry (via the frame helpers), the tab list (via the tabs reducer), and
+// renders the tab bar, one TerminalView per open tab, and a teaching empty
+// state. The only imperative islands are xterm itself (inside TerminalView)
+// and the pointer-capture drag/resize handlers, both behind refs.
+//
+// Nothing renders until the window is first opened; from then on it stays
+// mounted even while hidden, which is what keeps every tab's scrollback alive.
+// Show/hide is a CSS transition driven by data-state.
+import {
+  useCallback,
+  useEffect,
+  useReducer,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import { toast } from "sonner";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { ShellPicker } from "@/components/shell-picker";
+import type { ScopeOption } from "@/lib/scopes";
+import { TabBar } from "@/components/tab-bar";
+import { TerminalView } from "@/components/terminal-view";
+import { windowController } from "@/lib/controller";
+import {
+  clampFrame,
+  installDrag,
+  installResize,
+  loadFrame,
+  RESIZE_EDGES,
+  saveFrame,
+  type Frame,
+} from "@/lib/frame";
+import type { TerminalPump } from "@/lib/pump";
+import { createRpcClient } from "@/lib/rpc";
+import { emptyTabs, tabsReducer, type TabStatus } from "@/lib/tabs";
+import { cn } from "@/lib/utils";
+import type { rpcContract } from "../server";
+
+const PLUGIN_ID = "floating-terminal";
+
+/** Edge hit areas, wide enough to grab without visually thickening the border. */
+const EDGE_CLASS: Record<string, string> = {
+  n: "absolute inset-x-3 top-0 h-1.5 cursor-ns-resize",
+  s: "absolute inset-x-3 bottom-0 h-1.5 cursor-ns-resize",
+  e: "absolute inset-y-3 right-0 w-1.5 cursor-ew-resize",
+  w: "absolute inset-y-3 left-0 w-1.5 cursor-ew-resize",
+  ne: "absolute right-0 top-0 size-3 cursor-nesw-resize",
+  nw: "absolute left-0 top-0 size-3 cursor-nwse-resize",
+  se: "absolute bottom-0 right-0 size-3 cursor-nwse-resize",
+  sw: "absolute bottom-0 left-0 size-3 cursor-nesw-resize",
+};
+
+/** Geometry for openTab before any pump exists; the first fit corrects it. */
+const DEFAULT_COLS = 80;
+const DEFAULT_ROWS = 24;
+
+/**
+ * The window with nothing in it. Its job is to get you into a shell in one
+ * click and to answer the one question that changes how you use it — whether
+ * closing the window kills your work. Everything else stays quiet.
+ */
+function EmptyState({
+  scopes,
+  recentScopeKeys,
+  showHosts,
+  onPick,
+}: {
+  scopes: ScopeOption[];
+  recentScopeKeys: string[];
+  showHosts: boolean;
+  onPick: (scopeKey: string) => void;
+}) {
+  return (
+    <div className="flex size-full items-center justify-center overflow-hidden p-4">
+      {/* Centred while it fits, filling and scrolling once it does not. */}
+      <div className="flex max-h-full w-full min-w-0 max-w-md flex-col gap-3">
+        <div className="flex shrink-0 flex-col gap-1 px-1">
+          <h2 className="text-sm font-medium text-foreground">Start a shell</h2>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            Pick where it runs. Shells keep going while this window is hidden.
+          </p>
+        </div>
+        <ShellPicker
+          scopes={scopes}
+          recentScopeKeys={recentScopeKeys}
+          showHosts={showHosts}
+          onPick={onPick}
+          className="min-h-0 flex-1 rounded-lg border border-border bg-background/40"
+        />
+      </div>
+    </div>
+  );
+}
+
+export function FloatingTerminal() {
+  const open = useSyncExternalStore(
+    windowController.subscribe,
+    windowController.isOpen,
+  );
+
+  const rpcRef = useRef(createRpcClient<typeof rpcContract>(PLUGIN_ID));
+  const rpc = rpcRef.current;
+
+  const [state, dispatch] = useReducer(tabsReducer, emptyTabs);
+  const [scopes, setScopes] = useState<ScopeOption[]>([]);
+  const [recentScopeKeys, setRecentScopeKeys] = useState<string[]>([]);
+  const [fontSize, setFontSize] = useState(13);
+  const [shortcutEnabled, setShortcutEnabled] = useState(true);
+  const [themeVersion, setThemeVersion] = useState(0);
+  const [fitVersion, setFitVersion] = useState(0);
+  /**
+   * BB appends the plugin stylesheet to <head> without awaiting its load, so
+   * anything rendered before it arrives paints unstyled — a full-width block of
+   * raw markup at the end of <body> that snaps away when the CSS lands. Staying
+   * out of the DOM until the window is first opened removes that window
+   * entirely, and costs nothing for a session where it is never used.
+   */
+  const [mounted, setMounted] = useState(false);
+  /** One frame behind `mounted`, so the first open still animates in. */
+  const [armed, setArmed] = useState(false);
+
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const headerRef = useRef<HTMLDivElement | null>(null);
+  const edgeRefs = useRef(new Map<string, HTMLDivElement>());
+  const pumps = useRef(new Map<string, TerminalPump>());
+  /**
+   * Restarts already in flight. The restart button and the Enter-at-a-dead-
+   * prompt path can both fire for the same tab, and each extra call creates a
+   * PTY that no tab strip will ever show.
+   */
+  const restarting = useRef(new Set<string>());
+
+  // Geometry lives in a ref (the drag handlers read and write it every pointer
+  // move) and is mirrored onto the element directly — re-rendering React 60
+  // times a second to move a window is the wrong tool.
+  const frameRef = useRef<Frame>(loadFrame());
+
+  const applyFrame = useCallback((next: Frame) => {
+    frameRef.current = next;
+    const node = rootRef.current;
+    if (node === null) return;
+    node.style.left = `${next.x}px`;
+    node.style.top = `${next.y}px`;
+    node.style.width = `${next.width}px`;
+    node.style.height = `${next.height}px`;
+  }, []);
+
+  const commitFrame = useCallback(
+    (next: Frame) => {
+      applyFrame(next);
+      saveFrame(next);
+      setFitVersion((version) => version + 1);
+    },
+    [applyFrame],
+  );
+
+  // ------------------------------------------------------------- server io
+
+  // Mirrored into a ref so the stable useCallbacks below read the *current*
+  // active tab rather than whichever render created them — otherwise a new
+  // shell is always seeded at the 80x24 default instead of the window's real
+  // size, and briefly mis-wraps until the first resize lands.
+  const activeIdRef = useRef<string | null>(null);
+  activeIdRef.current = state.activeId;
+
+  const geometry = useCallback(() => {
+    const activeId = activeIdRef.current;
+    const pump = activeId === null ? null : pumps.current.get(activeId);
+    return pump === undefined || pump === null
+      ? { cols: DEFAULT_COLS, rows: DEFAULT_ROWS }
+      : { cols: pump.cols(), rows: pump.rows() };
+  }, []);
+
+  /**
+   * Pull the server's view of the world. Its tab list is the only thing that
+   * evicts a ghost — a tab whose shell died while the window was closed, or
+   * that another bb client closed. Ordering is handled by the snapshot's
+   * revision, so a slow reply simply loses to a newer one.
+   */
+  const sync = useCallback(async () => {
+    try {
+      const result = await rpc.call("init");
+      setScopes(result.scopes);
+      setRecentScopeKeys(result.recentScopeKeys);
+      setFontSize(result.prefs.fontSize);
+      setShortcutEnabled(result.prefs.shortcutEnabled);
+      dispatch({ type: "synced", snapshot: result.snapshot });
+    } catch {
+      toast.error("Floating Terminal could not reach its backend.");
+    }
+  }, [rpc]);
+
+  const openTab = useCallback(
+    async (scopeKey: string) => {
+      try {
+        const result = await rpc.call("openTab", { scopeKey, ...geometry() });
+        dispatch({
+          type: "synced",
+          snapshot: result.snapshot,
+          focusId: result.opened.terminalId,
+        });
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : "Could not start a shell",
+        );
+        void sync();
+      }
+    },
+    [rpc, sync, geometry],
+  );
+
+  const closeTab = useCallback(
+    async (terminalId: string) => {
+      try {
+        const result = await rpc.call("closeTab", { terminalId });
+        dispatch({ type: "synced", snapshot: result.snapshot });
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : "Could not close the shell",
+        );
+        void sync();
+      }
+    },
+    [rpc, sync],
+  );
+
+  const restartTab = useCallback(
+    async (terminalId: string) => {
+      if (restarting.current.has(terminalId)) return;
+      restarting.current.add(terminalId);
+      try {
+        const result = await rpc.call("restartTab", {
+          terminalId,
+          ...geometry(),
+        });
+        dispatch({
+          type: "synced",
+          snapshot: result.snapshot,
+          focusId: result.restarted.terminalId,
+        });
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : "Could not restart the shell",
+        );
+        // The tab is unrecoverable if the server no longer knows it; a resync
+        // removes it rather than leaving a dead row the user cannot revive.
+        void sync();
+      } finally {
+        restarting.current.delete(terminalId);
+      }
+    },
+    [rpc, sync, geometry],
+  );
+
+  const selectTab = useCallback(
+    (terminalId: string) => {
+      dispatch({ type: "activated", terminalId });
+      void rpc.call("setActiveTab", { terminalId }).catch(() => {
+        // Persistence only; the client already switched.
+      });
+    },
+    [rpc],
+  );
+
+  // ----------------------------------------------------------------- init
+
+  useEffect(() => {
+    if (open) setMounted(true);
+  }, [open]);
+
+  // A freshly inserted element has no previous value to transition from, so
+  // the entrance is painted in one step unless the closed state renders first.
+  useEffect(() => {
+    if (!mounted || armed) return;
+    const raf = window.requestAnimationFrame(() => setArmed(true));
+    return () => window.cancelAnimationFrame(raf);
+  }, [mounted, armed]);
+
+  // Every open re-syncs: directories change, and a shell can die while the
+  // window is hidden.
+  useEffect(() => {
+    if (!open) return;
+    void sync();
+  }, [open, sync]);
+
+  // ------------------------------------------------------------- gestures
+
+  useEffect(() => {
+    const header = headerRef.current;
+    if (header === null) return;
+    const aborter = new AbortController();
+    const options = {
+      getFrame: () => frameRef.current,
+      onChange: applyFrame,
+      onCommit: commitFrame,
+    };
+    installDrag(header, options, aborter.signal);
+    for (const edge of RESIZE_EDGES) {
+      const node = edgeRefs.current.get(edge);
+      if (node !== undefined) {
+        installResize(node, edge, options, aborter.signal);
+      }
+    }
+    return () => aborter.abort();
+  }, [applyFrame, commitFrame, mounted]);
+
+  // ---------------------------------------------------------- environment
+
+  useEffect(() => {
+    applyFrame(frameRef.current);
+  }, [applyFrame, mounted]);
+
+  useEffect(() => {
+    if (!open) return;
+    applyFrame(clampFrame(frameRef.current));
+    setFitVersion((version) => version + 1);
+  }, [open, applyFrame]);
+
+  useEffect(() => {
+    const onResize = () => applyFrame(clampFrame(frameRef.current));
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [applyFrame]);
+
+  useEffect(() => {
+    const observer = new MutationObserver(() =>
+      setThemeVersion((version) => version + 1),
+    );
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class", "style", "data-theme"],
+    });
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!shortcutEnabled) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.ctrlKey && !event.metaKey && !event.altKey && event.key === "`") {
+        event.preventDefault();
+        windowController.toggle();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown, { capture: true });
+    return () =>
+      window.removeEventListener("keydown", onKeyDown, { capture: true });
+  }, [shortcutEnabled]);
+
+  // --------------------------------------------------------------- render
+
+  const onStatus = useCallback(
+    (terminalId: string, status: TabStatus, detail: string | null) => {
+      dispatch({ type: "status", terminalId, status, detail });
+    },
+    [],
+  );
+
+  const onPumpReady = useCallback((terminalId: string, pump: TerminalPump) => {
+    pumps.current.set(terminalId, pump);
+  }, []);
+
+  const onPumpGone = useCallback((terminalId: string) => {
+    pumps.current.delete(terminalId);
+  }, []);
+
+  const onRequestRestart = useCallback(
+    (terminalId: string) => void restartTab(terminalId),
+    [restartTab],
+  );
+
+  const hide = useCallback(() => windowController.hide(), []);
+
+  // A bare ~ means nothing once there is more than one machine.
+  const showHosts = new Set(scopes.map((scope) => scope.hostName)).size > 1;
+
+  if (!mounted) return null;
+
+  return (
+    <TooltipProvider delayDuration={400}>
+      <div
+        ref={rootRef}
+        role="dialog"
+        // Non-modal on purpose: the point of this window is that bb stays
+        // usable behind it, so it must not read as a focus trap.
+        aria-modal="false"
+        aria-label="Floating terminal"
+        aria-hidden={!open}
+        data-state={open && armed ? "open" : "closed"}
+        className="bb-ft-window fixed z-40 flex flex-col overflow-hidden rounded-xl border border-border bg-card text-card-foreground shadow-2xl"
+      >
+        <div ref={headerRef}>
+          <TabBar
+            tabs={state.tabs}
+            activeId={state.activeId}
+            scopes={scopes}
+            recentScopeKeys={recentScopeKeys}
+            showHosts={showHosts}
+            onSelect={selectTab}
+            onClose={(terminalId) => void closeTab(terminalId)}
+            onNewTab={(scopeKey) => void openTab(scopeKey)}
+            onRestart={() => {
+              if (state.activeId !== null) void restartTab(state.activeId);
+            }}
+            onHide={hide}
+          />
+        </div>
+
+        <div className="relative min-h-0 flex-1 bg-card px-2 py-1.5">
+          {state.tabs.map((tab) => (
+            <TerminalView
+              key={tab.terminalId}
+              rpc={rpc}
+              terminalId={tab.terminalId}
+              visible={open && tab.terminalId === state.activeId}
+              fontSize={fontSize}
+              themeVersion={themeVersion}
+              fitVersion={fitVersion}
+              onStatus={onStatus}
+              onRequestRestart={onRequestRestart}
+              onToggleRequested={hide}
+              onPumpReady={onPumpReady}
+              onPumpGone={onPumpGone}
+            />
+          ))}
+          {state.tabs.length === 0 ? (
+            <EmptyState
+              scopes={scopes}
+              recentScopeKeys={recentScopeKeys}
+              showHosts={showHosts}
+              onPick={(scopeKey) => void openTab(scopeKey)}
+            />
+          ) : null}
+        </div>
+
+        {RESIZE_EDGES.map((edge) => (
+          <div
+            key={edge}
+            ref={(node) => {
+              if (node === null) edgeRefs.current.delete(edge);
+              else edgeRefs.current.set(edge, node);
+            }}
+            className={EDGE_CLASS[edge] ?? ""}
+            aria-hidden="true"
+          />
+        ))}
+      </div>
+    </TooltipProvider>
+  );
+}

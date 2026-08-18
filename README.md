@@ -1,0 +1,138 @@
+# Floating Terminal
+
+A real terminal that floats over bb. Open it from the sidebar footer or with
+`Ctrl+\``, run whatever you need next to the agent that is working, and hide it
+again — the shells keep running.
+
+![Three shells floating over a bb thread](docs/media/hero.png)
+
+*One window, several shells, sitting over the thread you are reading.*
+
+## Install
+
+```sh
+bb plugin install git:https://github.com/vburojevic/bb-plugin-floating-terminal
+```
+
+Requires bb >= 0.35. No keys, no setup — the button appears in the sidebar
+footer next to Settings the moment it lands.
+
+## What it does
+
+- **Tabs, one shell each.** Every tab is a real PTY on a real machine, not a
+  log view. `+` opens another one in any project checkout or any machine's home
+  directory.
+- **Multi-machine.** Every connected bb machine is offered, so a tab can be a
+  shell on a remote box. Paths are qualified as `host:path` once you have more
+  than one machine, and an offline machine says so instead of failing on click.
+- **It survives everything short of a reboot.** Open tabs are persisted, so
+  closing the window, reloading the app, or restarting bb reattaches to the
+  same shells with their scrollback intact. A shell that died while you were
+  away is dropped rather than left as a dead row.
+- **Drag it anywhere, resize from any edge.** The position is remembered. It
+  rests in the bottom-left corner with the same inset on every edge, which is
+  also the origin the open animation grows from, so it reads as coming out of
+  the button that opened it.
+- **Restart in place.** The restart button kills a tab's shell and starts a
+  fresh one in the same directory, keeping the tab where it is.
+
+### It asks where, not what
+
+![The empty window offering Recent, Projects and Machines](docs/media/directories.png)
+
+*With no shell running, the window offers directories rather than a blank pane.*
+
+The order is the design. A flat dump of every project and machine is a filing
+cabinet; putting the directories you actually opened at the top makes the list
+answer "where do you want to work". Once there are enough directories to stop
+being scannable, the list grows a search field.
+
+![The + menu offering the same list over a running shell](docs/media/new-tab.png)
+
+*The `+` menu renders the same picker, so the vocabulary never shifts.*
+
+### It looks like the rest of your bb
+
+![The same window in bb's light theme](docs/media/light.png)
+
+*The xterm palette is derived from bb's live theme tokens, light or dark.*
+
+## Settings
+
+**bb → Extensions → Floating Terminal**: font size, and whether `` Ctrl+` ``
+toggles the window.
+
+## How it fits together
+
+```
+app.tsx                       contentScript (React root) + sidebarFooterAction
+├── lib/controller.ts         external store: who opened/closed the window
+└── components/
+    ├── floating-terminal.tsx the window — geometry, server sync, layout
+    ├── shell-picker.tsx      the directory list, shared by both entry points
+    ├── tab-bar.tsx           the tab strip
+    └── terminal-view.tsx     one tab's terminal; owns a TerminalPump
+
+server.ts                     RPC over bb.sdk.terminals; tab list in kv
+lib/pump.ts                   one xterm <-> one PTY
+lib/tabs.ts                   pure reducer for the tab strip
+lib/scopes.ts                 which directories are offered, and in what order
+lib/frame.ts                  drag, resize, clamping, persistence
+lib/theme.ts                  bb's oklch tokens -> an xterm palette
+lib/rpc.ts                    fetch twin of the useRpc hook
+```
+
+Three things are worth knowing before changing it:
+
+**There is no bb React context.** A content script mounts the root into
+`document.body`, outside bb's component tree, so `useRpc`, `useSettings`, and
+`useBbContext` are unavailable. `lib/rpc.ts` speaks the plugin RPC wire format
+(`POST /api/v1/plugins/<id>/rpc/<method>`) directly and is typed off the same
+`rpcContract`.
+
+**Output is polled, not streamed.** bb exposes terminal output to plugins as a
+sequence-numbered buffer, so `lib/pump.ts` polls: 40 ms while bytes are moving,
+backing off to 320 ms when the shell is quiet, and stopping entirely for tabs
+that are not visible. A hidden tab costs nothing and is caught up on return.
+
+**The server owns the tab list; the client owns status and focus.** Every
+response carrying tab state is a `{ revision, tabs, activeTabId }` snapshot, and
+the reducer applies one only if its revision is strictly newer than the last.
+That is what makes overlapping requests safe: a slow `init` that started before
+an `openTab` committed carries an older revision and simply loses, so it can
+neither drop the new tab nor resurrect a closed one. Re-syncing on every window
+open is also what evicts a tab whose shell died while you were away.
+
+Server-side, every mutation runs inside `serialize`. Each is a read-modify-write
+over one kv array with awaits in the middle (`listScopes`, `close`, `create`),
+so without the mutex two overlapping calls would read the same snapshot and the
+last writer would silently drop the other's session — leaking a live PTY that
+appears in no list and can never be closed. This is invisible on localhost,
+where a round trip is ~2 ms, and easy to hit on a remote machine at ~100 ms.
+
+## Development
+
+```sh
+npm install
+npm run typecheck
+npm test
+bb plugin build
+bb plugin dev      # watch: rebuild + reload on every save
+```
+
+`components/ui/` is vendored source you own (the shadcn model) — edit it
+freely, it never updates out from under you. Add more from bb's registry, which
+is pinned in `components.json` to the bb release you are running:
+
+```sh
+npx shadcn add @bb/table @bb/command
+```
+
+React, `react-dom/client`, the radix portal primitives, and `sonner` are
+provided by the bb app at runtime and never bundled; everything else (xterm,
+hugeicons, tailwind-merge) bundles from `node_modules`. Ship `dist/` so
+consumers never need npm.
+
+## License
+
+[MIT](LICENSE)

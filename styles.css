@@ -1,0 +1,84 @@
+/*
+ * Everything Tailwind utilities cannot express for the floating window.
+ * All rules are scoped under .bb-ft-window so nothing here can reach the rest
+ * of the bb app — including the xterm.css imported alongside it.
+ */
+
+/*
+ * Show/hide is one authored motion moment: the window grows out of its
+ * bottom-left corner, pointing back at the sidebar footer button that opens
+ * it. Only opacity and transform animate, so the layout box is final from the
+ * first frame and xterm never has to reflow mid-animation. The delayed
+ * visibility transition keeps the element interactive-none and invisible
+ * after the exit lands, with no JavaScript timers involved.
+ */
+.bb-ft-window {
+  transform-origin: 0% 100%;
+}
+
+.bb-ft-window[data-state="closed"] {
+  opacity: 0;
+  pointer-events: none;
+  transform: translate3d(-8px, 12px, 0) scale(0.97);
+  transition:
+    opacity 130ms cubic-bezier(0.4, 0, 1, 1),
+    transform 130ms cubic-bezier(0.4, 0, 1, 1),
+    visibility 0s linear 130ms;
+  visibility: hidden;
+}
+
+.bb-ft-window[data-state="open"] {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+  transition:
+    opacity 190ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 190ms cubic-bezier(0.16, 1, 0.3, 1);
+  visibility: visible;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bb-ft-window[data-state="closed"],
+  .bb-ft-window[data-state="open"] {
+    transition: none;
+  }
+}
+
+/* Let the terminal own the full body box; FitAddon sizes rows/cols to it. */
+.bb-ft-window .xterm {
+  height: 100%;
+  padding: 0;
+}
+
+.bb-ft-window .xterm .xterm-viewport {
+  background-color: transparent;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.bb-ft-window .xterm .xterm-viewport::-webkit-scrollbar {
+  width: 8px;
+}
+
+.bb-ft-window .xterm .xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.bb-ft-window .xterm .xterm-viewport::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: content-box;
+  background-color: var(--border);
+}
+
+.bb-ft-window .xterm .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background-color: var(--muted-foreground);
+}
+
+/* The tab strip scrolls horizontally without showing a scrollbar. */
+.bb-ft-window [role="tablist"] {
+  scrollbar-width: none;
+}
+
+.bb-ft-window [role="tablist"]::-webkit-scrollbar {
+  display: none;
+}
