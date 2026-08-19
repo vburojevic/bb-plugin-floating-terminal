@@ -19,6 +19,13 @@ export interface TabState {
   cwd: string;
   status: TabStatus;
   statusDetail: string | null;
+  /** An OSC title the shell set; the tab strip prefers it over `label`. */
+  shellTitle: string | null;
+}
+
+/** What the tab strip shows: what the shell called itself, else where it runs. */
+export function tabName(tab: TabState): string {
+  return tab.shellTitle ?? tab.label;
 }
 
 export interface TabsState {
@@ -36,6 +43,7 @@ export interface ServerTab {
   hostName: string;
   cwd: string;
   status: string;
+  shellTitle: string | null;
 }
 
 export interface Snapshot {
@@ -71,6 +79,7 @@ function fromServer(tab: ServerTab): TabState {
         ? "connecting" // live once the pump's first read confirms it
         : "exited",
     statusDetail: null,
+    shellTitle: tab.shellTitle,
   };
 }
 
@@ -91,7 +100,15 @@ export function tabsReducer(state: TabsState, action: TabsAction): TabsState {
       // just because something else changed.
       const tabs = action.snapshot.tabs.map((tab) => {
         const existing = previous.get(tab.terminalId);
-        return existing === undefined ? fromServer(tab) : existing;
+        if (existing === undefined) return fromServer(tab);
+        // Naming is the server's half of the split, so it has to flow through
+        // to a tab the client already knows; status stays the client's. Reuse
+        // the existing object when neither changed, or every snapshot would
+        // re-render the whole strip.
+        if (existing.shellTitle === tab.shellTitle && existing.label === tab.label) {
+          return existing;
+        }
+        return { ...existing, label: tab.label, shellTitle: tab.shellTitle };
       });
 
       const has = (id: string | null | undefined) =>

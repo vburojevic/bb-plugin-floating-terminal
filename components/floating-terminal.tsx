@@ -53,6 +53,9 @@ const EDGE_CLASS: Record<string, string> = {
   sw: "absolute bottom-0 left-0 size-3 cursor-nesw-resize",
 };
 
+/** Long enough that a per-prompt title setter costs one rename, not dozens. */
+const TITLE_RENAME_DEBOUNCE_MS = 500;
+
 /** Geometry for openTab before any pump exists; the first fit corrects it. */
 const DEFAULT_COLS = 80;
 const DEFAULT_ROWS = 24;
@@ -371,6 +374,45 @@ export function FloatingTerminal() {
     [restartTab],
   );
 
+  // A shell that sets its title on every prompt would otherwise put a rename
+  // round trip behind every command, so coalesce and drop no-ops. Keyed by
+  // terminal so two busy tabs cannot cancel each other's pending rename.
+  const titleTimers = useRef(new Map<string, number>());
+  const lastTitles = useRef(new Map<string, string | null>());
+
+  const onTitle = useCallback(
+    (terminalId: string, title: string | null) => {
+      if (lastTitles.current.get(terminalId) === title) return;
+      lastTitles.current.set(terminalId, title);
+      const pending = titleTimers.current.get(terminalId);
+      if (pending !== undefined) window.clearTimeout(pending);
+      titleTimers.current.set(
+        terminalId,
+        window.setTimeout(() => {
+          titleTimers.current.delete(terminalId);
+          void rpc
+            .call("renameTab", { terminalId, title })
+            .then((result) =>
+              dispatch({ type: "synced", snapshot: result.snapshot }),
+            )
+            .catch(() => {
+              // A name is cosmetic; let the next snapshot settle it.
+            });
+        }, TITLE_RENAME_DEBOUNCE_MS),
+      );
+    },
+    [rpc],
+  );
+
+  useEffect(
+    () => () => {
+      for (const timer of titleTimers.current.values()) {
+        window.clearTimeout(timer);
+      }
+    },
+    [],
+  );
+
   const hide = useCallback(() => windowController.hide(), []);
 
   // A bare ~ means nothing once there is more than one machine.
@@ -419,6 +461,7 @@ export function FloatingTerminal() {
               themeVersion={themeVersion}
               fitVersion={fitVersion}
               onStatus={onStatus}
+              onTitle={onTitle}
               onRequestRestart={onRequestRestart}
               onToggleRequested={hide}
               onPumpReady={onPumpReady}

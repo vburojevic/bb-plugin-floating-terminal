@@ -13,6 +13,29 @@ var __export = (target, all) => {
 // server.ts
 import { defineRpcContract } from "@bb/plugin-sdk";
 
+// lib/terminal-io.ts
+var INPUT_MAX_BYTES = 64 * 1024;
+var TITLE_MAX_LENGTH = 200;
+var SHELL_PATH_TITLE = /^[^@\s:]+@[^:\s]+:(.+)$/u;
+function isPathLike(path) {
+  return path === "~" || path === "." || path.startsWith("~/") || path.startsWith("/") || path.startsWith("./");
+}
+function normalizeTerminalTitle(title) {
+  const trimmed = title.trim();
+  if (trimmed === "") return null;
+  const path = SHELL_PATH_TITLE.exec(trimmed)?.[1]?.trimStart();
+  if (path !== void 0 && path !== "" && isPathLike(path)) return null;
+  return trimmed.slice(0, TITLE_MAX_LENGTH);
+}
+function meaningfulShellTitle(title, { label, defaultTitle, cwd }) {
+  const normalized = normalizeTerminalTitle(title);
+  if (normalized === null || normalized === defaultTitle) return null;
+  const head = normalized.split(/[:—]/u)[0].trim();
+  const base = cwd.split("/").filter((part) => part !== "").pop() ?? cwd;
+  if (head === base || head === label || head === "") return null;
+  return normalized;
+}
+
 // node_modules/zod/v4/classic/external.js
 var external_exports = {};
 __export(external_exports, {
@@ -14549,7 +14572,13 @@ var tabSchema = external_exports.object({
   hostName: external_exports.string(),
   cwd: external_exports.string(),
   status: external_exports.string(),
-  exitCode: external_exports.number().int().nullable()
+  exitCode: external_exports.number().int().nullable(),
+  /**
+   * A title the shell set over OSC, or null while the session still wears the
+   * one `createSession` stamped. Lives on the bb session rather than in plugin
+   * storage, so `bb terminal list` and bb's own UI show the same name.
+   */
+  shellTitle: external_exports.string().nullable()
 });
 var snapshotSchema = external_exports.object({
   revision: external_exports.number().int(),
@@ -14586,6 +14615,11 @@ var rpcContract = defineRpcContract({
   setActiveTab: {
     input: external_exports.object({ terminalId: external_exports.string() }).strict(),
     output: external_exports.object({ ok: external_exports.boolean() })
+  },
+  /** Adopt an OSC title the shell set. Null restores the default name. */
+  renameTab: {
+    input: external_exports.object({ terminalId: external_exports.string(), title: external_exports.string().nullable() }).strict(),
+    output: external_exports.object({ snapshot: snapshotSchema })
   },
   /** Kill this tab's shell and start a fresh one in the same directory. */
   restartTab: {
@@ -14750,6 +14784,9 @@ async function plugin(bb) {
     const segments = cwd.split("/").filter((part) => part !== "");
     return segments[segments.length - 1] ?? cwd;
   }
+  function defaultTitle(label, hostName) {
+    return hostName === "" ? label : `${label} \xB7 ${hostName}`;
+  }
   const lastKnownTabs = /* @__PURE__ */ new Map();
   async function snapshot() {
     const [stored, scopes, storedActive] = await Promise.all([
@@ -14768,14 +14805,21 @@ async function plugin(bb) {
           );
           if (!isLiveStatus(session.status)) return null;
           const scope = scopes.find((item) => item.key === entry.scopeKey) ?? null;
+          const label = scope?.label ?? labelFromCwd(session.initialCwd);
+          const hostName = scope?.hostName ?? "";
           const tab = {
             terminalId: session.id,
             scopeKey: entry.scopeKey,
-            label: scope?.label ?? labelFromCwd(session.initialCwd),
-            hostName: scope?.hostName ?? "",
+            label,
+            hostName,
             cwd: session.initialCwd,
             status: session.status,
-            exitCode: session.exitCode
+            exitCode: session.exitCode,
+            shellTitle: meaningfulShellTitle(session.title, {
+              label,
+              defaultTitle: defaultTitle(label, hostName),
+              cwd: session.initialCwd
+            })
           };
           lastKnownTabs.set(tab.terminalId, tab);
           return tab;
@@ -14818,7 +14862,7 @@ async function plugin(bb) {
         rows,
         scope: { kind: "host_path", hostId: scope.hostId, cwd: scope.cwd },
         // `bb terminal list` has no grouping to lean on, so name the machine here.
-        title: `${scope.label} \xB7 ${scope.hostName}`
+        title: defaultTitle(scope.label, scope.hostName)
       }),
       CREATE_TIMEOUT_MS,
       "terminals.create"
@@ -14831,7 +14875,8 @@ async function plugin(bb) {
       hostName: scope.hostName,
       cwd: created.initialCwd,
       status: created.status,
-      exitCode: created.exitCode
+      exitCode: created.exitCode,
+      shellTitle: null
     };
   }
   bb.rpc.register(rpcContract, {
@@ -14893,6 +14938,30 @@ async function plugin(bb) {
     async setActiveTab({ terminalId }) {
       await bb.storage.kv.set(ACTIVE_TAB_KEY, terminalId);
       return { ok: true };
+    },
+    renameTab({ terminalId, title }) {
+      return serialize(async () => {
+        const stored = await readStoredTabs();
+        const entry = stored.find((tab) => tab.terminalId === terminalId);
+        if (entry === void 0) return { snapshot: await snapshot() };
+        const scope = (await listScopes()).find(
+          (item) => item.key === entry.scopeKey
+        );
+        const restored = scope === void 0 ? null : defaultTitle(scope.label, scope.hostName);
+        const next = title ?? restored;
+        if (next === null) return { snapshot: await snapshot() };
+        try {
+          await withTimeout(
+            bb.sdk.terminals.rename({ terminalId, title: next }),
+            SDK_TIMEOUT_MS,
+            "terminals.rename"
+          );
+        } catch {
+          return { snapshot: await snapshot() };
+        }
+        await bumpRevision();
+        return { snapshot: await snapshot() };
+      });
     },
     restartTab({ terminalId, cols, rows }) {
       return serialize(async () => {

@@ -9,10 +9,18 @@
 // about tabs or windows; it reports status upward and asks for a restart when
 // the user presses Enter at a dead prompt.
 import { FitAddon } from "@xterm/addon-fit";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { WebLinksAddon } from "@xterm/addon-web-links";
+import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import type { PluginRpcClient } from "@bb/plugin-sdk/app";
 import type { rpcContract } from "../server";
 import type { TabStatus } from "./tabs";
+import {
+  base64ToBytes,
+  encodeInputChunks,
+  normalizeTerminalTitle,
+} from "./terminal-io";
 import { resolveMonoFont, resolveTerminalTheme } from "./theme";
 
 type Rpc = PluginRpcClient<typeof rpcContract>;
@@ -23,25 +31,10 @@ const SLOW_INTERVAL = 320;
 /** Coalesce burst keystrokes and pastes into one request. */
 const INPUT_FLUSH_MS = 4;
 const RESIZE_DEBOUNCE_MS = 90;
-
-function base64ToBytes(base64: string): Uint8Array {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return bytes;
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  // Chunked so a large paste cannot blow the argument limit of fromCharCode.
-  let binary = "";
-  const step = 8192;
-  for (let index = 0; index < bytes.length; index += step) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + step));
-  }
-  return btoa(binary);
-}
+/** What bb's own terminal keeps, so scrollback depth matches between the two. */
+const SCROLLBACK_LINES = 10_000;
+/** Matches bb's terminal, whose wide-glyph widths come from Unicode 11. */
+const UNICODE_VERSION = "11";
 
 export interface PumpOptions {
   container: HTMLElement;
@@ -53,13 +46,14 @@ export interface PumpOptions {
   onRequestRestart: () => void;
   /** Fired for shortcuts xterm must not swallow (the global toggle). */
   onToggleRequested: () => void;
+  /** A meaningful OSC title the shell set, already normalised. Null clears it. */
+  onTitle?: (title: string | null) => void;
 }
 
 export class TerminalPump {
   private readonly terminal: Terminal;
   private readonly fitAddon = new FitAddon();
   private readonly options: PumpOptions;
-  private readonly encoder = new TextEncoder();
 
   private nextSeq = 0;
   private interval = FAST_INTERVAL;
@@ -80,6 +74,14 @@ export class TerminalPump {
   private visible = false;
   private started = false;
   private disposed = false;
+  private resizeObserver: ResizeObserver | null = null;
+  /**
+   * Non-zero while replayed scrollback is still being parsed. xterm answers
+   * some sequences (cursor-position reports, device attributes) through onData,
+   * and replaying historical output makes it answer them all over again — so
+   * without this the shell receives a burst of synthetic input on every attach.
+   */
+  private replayWrites = 0;
 
   constructor(options: PumpOptions) {
     this.options = options;
@@ -90,15 +92,40 @@ export class TerminalPump {
       fontFamily: resolveMonoFont(options.container),
       theme: theme.xterm,
       cursorBlink: true,
-      scrollback: 5000,
+      convertEol: true,
+      scrollback: SCROLLBACK_LINES,
+      // Unicode 11 widths need the proposed API surface, same as bb's terminal.
+      allowProposedApi: true,
       // Trim the default row gap; the window is small and vertical space is
       // the scarcest thing in it.
       lineHeight: 1.15,
     });
     this.terminal.loadAddon(this.fitAddon);
+    this.terminal.loadAddon(new Unicode11Addon());
+    this.terminal.unicode.activeVersion = UNICODE_VERSION;
+    this.terminal.loadAddon(
+      new WebLinksAddon((event, uri) => {
+        event.preventDefault();
+        // A content script has no bb router to hand this to, so it goes to the
+        // browser the same way bb's own external-link path ends up.
+        window.open(uri, "_blank", "noopener,noreferrer");
+      }),
+    );
+    // Register WebGL *before* open(): the DOM renderer measures every newly
+    // encountered glyph with synchronous layout reads, and once it exists that
+    // cost is already paid. A machine without a working WebGL context falls
+    // back to it silently.
+    this.loadWebglRenderer();
     this.terminal.open(options.container);
+    this.observeContainer();
+
+    this.terminal.onTitleChange((title) => {
+      if (this.replayWrites > 0 || this.disposed) return;
+      this.options.onTitle?.(normalizeTerminalTitle(title));
+    });
 
     this.terminal.onData((data) => {
+      if (this.replayWrites > 0) return;
       if (this.status === "exited" && data.includes("\r")) {
         // Latched: the pump stays "exited" for the whole restart round trip,
         // so without this every extra Enter fires another restart, and each
@@ -138,6 +165,60 @@ export class TerminalPump {
     });
   }
 
+  /**
+   * Refit whenever the box actually changes, not only when the window commits a
+   * drag. A font-size change, the tab strip wrapping, or the bb window itself
+   * resizing all move this container without any gesture the window hears about,
+   * and an unfitted xterm reports stale cols/rows to the pty.
+   */
+  private observeContainer(): void {
+    if (typeof ResizeObserver === "undefined") return;
+    let frame: number | null = null;
+    this.resizeObserver = new ResizeObserver(() => {
+      // rAF-coalesced: fit() writes back into the observed box, and calling it
+      // synchronously inside the callback is what trips "loop limit exceeded".
+      if (frame !== null || this.disposed) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        if (!this.disposed) this.fit();
+      });
+    });
+    this.resizeObserver.observe(this.options.container);
+  }
+
+  /**
+   * WebGL is best-effort: a failed construction, a refused context, or a driver
+   * that later drops the context all fall back to the DOM renderer rather than
+   * leaving a dead canvas. Mirrors what bb's own terminal does.
+   */
+  private loadWebglRenderer(): void {
+    let addon: WebglAddon | null = null;
+    let contextLoss: { dispose: () => void } | null = null;
+    try {
+      addon = new WebglAddon();
+      contextLoss = addon.onContextLoss(() => {
+        contextLoss?.dispose();
+        addon?.dispose();
+      });
+      this.terminal.loadAddon(addon);
+    } catch {
+      contextLoss?.dispose();
+      addon?.dispose();
+    }
+  }
+
+  /** Track replay writes so onData/onTitleChange stay muted until they land. */
+  private writeOutput(bytes: Uint8Array, isReplay: boolean): void {
+    if (!isReplay) {
+      this.terminal.write(bytes);
+      return;
+    }
+    this.replayWrites += 1;
+    this.terminal.write(bytes, () => {
+      this.replayWrites -= 1;
+    });
+  }
+
   private setStatus(status: TabStatus, detail: string | null = null): void {
     if (this.status === status && detail === null) return;
     this.status = status;
@@ -158,21 +239,23 @@ export class TerminalPump {
     this.outbox = [];
     if (pending === "" || this.disposed) return;
 
-    const dataBase64 = bytesToBase64(this.encoder.encode(pending));
-    // Chained so keystrokes reach the pty in the order they were typed.
-    this.writeChain = this.writeChain
-      .then(() =>
-        this.options.rpc.call("write", {
-          terminalId: this.options.terminalId,
-          dataBase64,
-        }),
-      )
-      .catch((error: unknown) => {
-        this.setStatus(
-          "error",
-          error instanceof Error ? error.message : "Write failed",
-        );
-      });
+    // Chained so keystrokes reach the pty in the order they were typed, and
+    // chunked so a paste over the transport ceiling is split instead of refused.
+    for (const dataBase64 of encodeInputChunks(pending)) {
+      this.writeChain = this.writeChain
+        .then(() =>
+          this.options.rpc.call("write", {
+            terminalId: this.options.terminalId,
+            dataBase64,
+          }),
+        )
+        .catch((error: unknown) => {
+          this.setStatus(
+            "error",
+            error instanceof Error ? error.message : "Write failed",
+          );
+        });
+    }
     // Any keystroke pulls polling back to its fastest.
     this.interval = FAST_INTERVAL;
     if (this.pollTimer !== null) this.schedule(FAST_INTERVAL);
@@ -231,7 +314,7 @@ export class TerminalPump {
         next = "replay";
       } else {
         for (const chunk of result.chunks) {
-          this.terminal.write(base64ToBytes(chunk.dataBase64));
+          this.writeOutput(base64ToBytes(chunk.dataBase64), false);
         }
         this.nextSeq = result.nextSeq;
 
@@ -297,7 +380,7 @@ export class TerminalPump {
       if (!this.disposed) {
         this.terminal.reset();
         for (const chunk of result.chunks) {
-          this.terminal.write(base64ToBytes(chunk.dataBase64));
+          this.writeOutput(base64ToBytes(chunk.dataBase64), true);
         }
         this.nextSeq = result.nextSeq;
         this.interval = FAST_INTERVAL;
@@ -380,6 +463,8 @@ export class TerminalPump {
   dispose(): void {
     this.disposed = true;
     this.stopPolling();
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
     if (this.flushTimer !== null) window.clearTimeout(this.flushTimer);
     if (this.resizeTimer !== null) window.clearTimeout(this.resizeTimer);
     this.terminal.dispose();

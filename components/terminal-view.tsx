@@ -21,6 +21,8 @@ export interface TerminalViewProps {
   /** Bumped on window drag/resize commits; the visible pump refits. */
   fitVersion: number;
   onStatus: (terminalId: string, status: TabStatus, detail: string | null) => void;
+  /** A normalised OSC title from the shell, or null when it has none. */
+  onTitle: (terminalId: string, title: string | null) => void;
   onRequestRestart: (terminalId: string) => void;
   onToggleRequested: () => void;
   onPumpReady: (terminalId: string, pump: TerminalPump) => void;
@@ -35,6 +37,7 @@ export function TerminalView({
   themeVersion,
   fitVersion,
   onStatus,
+  onTitle,
   onRequestRestart,
   onToggleRequested,
   onPumpReady,
@@ -45,8 +48,13 @@ export function TerminalView({
 
   // Callbacks live in refs so the pump effect depends only on terminalId and
   // never tears down a live terminal because a parent re-rendered.
-  const handlersRef = useRef({ onStatus, onRequestRestart, onToggleRequested });
-  handlersRef.current = { onStatus, onRequestRestart, onToggleRequested };
+  const handlersRef = useRef({
+    onStatus,
+    onTitle,
+    onRequestRestart,
+    onToggleRequested,
+  });
+  handlersRef.current = { onStatus, onTitle, onRequestRestart, onToggleRequested };
 
   useEffect(() => {
     const container = containerRef.current;
@@ -59,6 +67,7 @@ export function TerminalView({
       fontSize,
       onStatus: (status, detail) =>
         handlersRef.current.onStatus(terminalId, status, detail),
+      onTitle: (title) => handlersRef.current.onTitle(terminalId, title),
       onRequestRestart: () => handlersRef.current.onRequestRestart(terminalId),
       onToggleRequested: () => handlersRef.current.onToggleRequested(),
     });

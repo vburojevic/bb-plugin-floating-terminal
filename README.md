@@ -35,6 +35,10 @@ footer next to Settings the moment it lands.
   the button that opened it.
 - **Restart in place.** The restart button kills a tab's shell and starts a
   fresh one in the same directory, keeping the tab where it is.
+- **The same terminal bb runs.** WebGL rendering, Unicode 11 widths, clickable
+  links, bb's Nerd Font stack, 10 000 lines of scrollback — so a powerline
+  prompt, a box-drawing TUI, and an emoji all land the same way they do in bb's
+  own terminal panel.
 
 ### It asks where, not what
 
@@ -57,6 +61,18 @@ being scannable, the list grows a search field.
 
 *The xterm palette is derived from bb's live theme tokens, light or dark.*
 
+Background, foreground, cursor and selection come from the window's own card
+tokens; the ANSI 16 come from `--ansi-0` … `--ansi-15`, the same tokens bb's
+terminal reads. Switch bb to Dracula or Gruvbox and this window's reds and
+yellows move with it, instead of sitting on a palette of their own.
+
+A tab is named for the directory it runs in, and takes the shell's title when
+the shell sets one worth having — `npm run dev` while that is running, back to
+`Acme Storefront` at the prompt. Titles that only restate the location
+(`user@host:~/Git/acme`, `acme-storefront:main`) are ignored, because the tab
+already says that; the directory stays in the tooltip either way. The rename
+lands on the bb session itself, so `bb terminal list` shows the same name.
+
 ## Settings
 
 **bb → Extensions → Floating Terminal**: font size, and whether `` Ctrl+` ``
@@ -76,6 +92,7 @@ app.tsx                       contentScript (React root) + sidebarFooterAction
 server.ts                     RPC over bb.sdk.terminals; tab list in kv
 lib/pump.ts                   one xterm <-> one PTY
 lib/tabs.ts                   pure reducer for the tab strip
+lib/terminal-io.ts            input chunking, shell-title filtering
 lib/scopes.ts                 which directories are offered, and in what order
 lib/frame.ts                  drag, resize, clamping, persistence
 lib/theme.ts                  bb's oklch tokens -> an xterm palette

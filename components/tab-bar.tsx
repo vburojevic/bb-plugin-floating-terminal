@@ -20,7 +20,7 @@ import {
 } from "@/components/ui/tooltip";
 import { ShellPicker } from "@/components/shell-picker";
 import type { ScopeOption } from "@/lib/scopes";
-import type { TabState } from "@/lib/tabs";
+import { tabName, type TabState } from "@/lib/tabs";
 import { cn } from "@/lib/utils";
 
 export interface TabBarProps {
@@ -98,6 +98,7 @@ function TabItem({
   onClose: () => void;
 }) {
   const dot = statusDotClass(tab);
+  const name = tabName(tab);
 
   function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     if (event.key === "Enter" || event.key === " ") {
@@ -115,7 +116,7 @@ function TabItem({
           aria-selected={active}
           // Explicit, or the name is computed from contents and the nested
           // close button folds in: "Home Close Home".
-          aria-label={tab.label}
+          aria-label={name}
           data-no-drag=""
           onClick={onSelect}
           onKeyDown={handleKeyDown}
@@ -133,10 +134,10 @@ function TabItem({
               aria-hidden="true"
             />
           )}
-          <span className="min-w-0 truncate">{tab.label}</span>
+          <span className="min-w-0 truncate">{name}</span>
           <button
             type="button"
-            aria-label={`Close ${tab.label}`}
+            aria-label={`Close ${name}`}
             onClick={(event) => {
               event.stopPropagation();
               onClose();
@@ -152,6 +153,11 @@ function TabItem({
         </div>
       </TooltipTrigger>
       <TooltipContent>
+        {/* Once a shell title takes over the tab, this is the only place left
+            that still says where the shell actually runs. */}
+        {tab.shellTitle === null ? null : (
+          <span className="block text-xs">{tab.label}</span>
+        )}
         <span className="font-mono text-xs">
           {tab.hostName === "" ? tab.cwd : `${tab.hostName}:${tab.cwd}`}
         </span>

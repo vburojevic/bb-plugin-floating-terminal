@@ -41,8 +41,37 @@ function luminance(hex: string): number {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
-/** ANSI 16 is not part of bb's token set, so ship a pair tuned for each mode. */
-const DARK_ANSI = {
+/**
+ * bb publishes the full ANSI 16 as `--ansi-0` … `--ansi-15`, and every built-in
+ * theme (nord, dracula, solarized, gruvbox, catppuccin) overrides them — so the
+ * host tokens are read first and these pairs are only the fallback for a host
+ * that does not define them. Matching bb's own terminal here is the whole point:
+ * without it a themed bb shows one red in its terminal panel and another in this
+ * window.
+ */
+const ANSI_TOKEN_NAMES = [
+  "black",
+  "red",
+  "green",
+  "yellow",
+  "blue",
+  "magenta",
+  "cyan",
+  "white",
+  "brightBlack",
+  "brightRed",
+  "brightGreen",
+  "brightYellow",
+  "brightBlue",
+  "brightMagenta",
+  "brightCyan",
+  "brightWhite",
+] as const;
+
+type AnsiName = (typeof ANSI_TOKEN_NAMES)[number];
+type AnsiPalette = Record<AnsiName, string>;
+
+const DARK_ANSI: AnsiPalette = {
   black: "#3b4048",
   red: "#e06c75",
   green: "#98c379",
@@ -61,7 +90,7 @@ const DARK_ANSI = {
   brightWhite: "#e6e9ef",
 };
 
-const LIGHT_ANSI = {
+const LIGHT_ANSI: AnsiPalette = {
   black: "#3b4252",
   red: "#c9184a",
   green: "#3f7d20",
@@ -94,11 +123,20 @@ export interface ResolvedTheme {
   isDark: boolean;
 }
 
+/** `--ansi-0` … `--ansi-15`, each falling back to this mode's tuned pair. */
+function resolveAnsi(scope: HTMLElement, fallback: AnsiPalette): AnsiPalette {
+  const palette = {} as AnsiPalette;
+  ANSI_TOKEN_NAMES.forEach((name, index) => {
+    palette[name] = token(scope, `--ansi-${index}`, fallback[name]);
+  });
+  return palette;
+}
+
 export function resolveTerminalTheme(scope: HTMLElement): ResolvedTheme {
   const background = token(scope, "--card", "#16181d");
   const foreground = token(scope, "--card-foreground", "#e6e9ef");
   const isDark = luminance(background) < 0.5;
-  const ansi = isDark ? DARK_ANSI : LIGHT_ANSI;
+  const ansi = resolveAnsi(scope, isDark ? DARK_ANSI : LIGHT_ANSI);
 
   return {
     isDark,
@@ -114,12 +152,21 @@ export function resolveTerminalTheme(scope: HTMLElement): ResolvedTheme {
   };
 }
 
+/**
+ * The same Nerd Font stack bb's own terminal asks for, so a powerline prompt or
+ * a devicon renders here exactly as it does in bb's terminal panel rather than
+ * as tofu. These names only match if the fonts are installed; when they are not,
+ * the host's `--font-mono` still gets its turn before the generic fallbacks.
+ */
+const NERD_FONTS =
+  '"JetBrainsMono Nerd Font Mono", "MesloLGS NF", "Symbols Nerd Font Mono"';
+const GENERIC_MONO =
+  'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace';
+
 export function resolveMonoFont(scope: HTMLElement): string {
   const declared = getComputedStyle(scope).getPropertyValue("--font-mono").trim();
-  const fallback =
-    'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace';
   // xterm applies this as a literal font-family, so an unresolved var() would
   // invalidate the whole declaration rather than falling through the list.
-  if (declared === "" || declared.includes("var(")) return fallback;
-  return `${declared}, ${fallback}`;
+  const host = declared === "" || declared.includes("var(") ? null : declared;
+  return [NERD_FONTS, host, GENERIC_MONO].filter((part) => part !== null).join(", ");
 }

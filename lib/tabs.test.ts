@@ -7,6 +7,7 @@
 import { describe, expect, it } from "vitest";
 import {
   emptyTabs,
+  tabName,
   tabsReducer,
   type ServerTab,
   type Snapshot,
@@ -21,6 +22,7 @@ function serverTab(id: string, overrides: Partial<ServerTab> = {}): ServerTab {
     hostName: "mac",
     cwd: `/home/${id}`,
     status: "running",
+    shellTitle: null,
     ...overrides,
   };
 }
@@ -160,5 +162,65 @@ describe("tabsReducer — snapshot ordering", () => {
   it("ignores a replayed snapshot at the same revision", () => {
     const before = synced(emptyTabs, 4, ["a"]);
     expect(synced(before, 4, ["a", "b"])).toBe(before);
+  });
+});
+
+describe("shell titles", () => {
+  it("flows a new server title onto a tab the client already knows", () => {
+    let state = tabsReducer(emptyTabs, {
+      type: "synced",
+      snapshot: snapshot(1, ["a"]),
+    });
+    state = tabsReducer(state, {
+      type: "status",
+      terminalId: "a",
+      status: "live",
+      detail: null,
+    });
+
+    const renamed: Snapshot = {
+      revision: 2,
+      tabs: [serverTab("a", { shellTitle: "npm run dev" })],
+      activeTabId: "a",
+    };
+    const next = tabsReducer(state, { type: "synced", snapshot: renamed });
+
+    expect(next.tabs[0]!.shellTitle).toBe("npm run dev");
+    // Naming is the server's half of the split; status stays the client's.
+    expect(next.tabs[0]!.status).toBe("live");
+  });
+
+  it("keeps the same tab object when nothing about it changed", () => {
+    const state = tabsReducer(emptyTabs, {
+      type: "synced",
+      snapshot: snapshot(1, ["a"]),
+    });
+    const next = tabsReducer(state, {
+      type: "synced",
+      snapshot: snapshot(2, ["a"]),
+    });
+    expect(next.tabs[0]).toBe(state.tabs[0]);
+  });
+
+  it("falls back to the directory label once a title is cleared", () => {
+    let state = tabsReducer(emptyTabs, {
+      type: "synced",
+      snapshot: {
+        revision: 1,
+        tabs: [serverTab("a", { label: "Acme", shellTitle: "vim README.md" })],
+        activeTabId: "a",
+      },
+    });
+    expect(tabName(state.tabs[0]!)).toBe("vim README.md");
+
+    state = tabsReducer(state, {
+      type: "synced",
+      snapshot: {
+        revision: 2,
+        tabs: [serverTab("a", { label: "Acme", shellTitle: null })],
+        activeTabId: "a",
+      },
+    });
+    expect(tabName(state.tabs[0]!)).toBe("Acme");
   });
 });

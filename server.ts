@@ -19,6 +19,7 @@
 //     applied, so a slow `init` can never resurrect a closed tab or drop a
 //     freshly opened one just because it started earlier.
 import { defineRpcContract, type BbPluginApi } from "@bb/plugin-sdk";
+import { meaningfulShellTitle } from "./lib/terminal-io";
 import { z } from "zod";
 
 /** Cap on the scrollback replayed when the window (re)attaches to a session. */
@@ -46,6 +47,12 @@ const tabSchema = z.object({
   cwd: z.string(),
   status: z.string(),
   exitCode: z.number().int().nullable(),
+  /**
+   * A title the shell set over OSC, or null while the session still wears the
+   * one `createSession` stamped. Lives on the bb session rather than in plugin
+   * storage, so `bb terminal list` and bb's own UI show the same name.
+   */
+  shellTitle: z.string().nullable(),
 });
 
 /** The authoritative tab state, versioned so stale replies can be discarded. */
@@ -86,6 +93,13 @@ export const rpcContract = defineRpcContract({
   setActiveTab: {
     input: z.object({ terminalId: z.string() }).strict(),
     output: z.object({ ok: z.boolean() }),
+  },
+  /** Adopt an OSC title the shell set. Null restores the default name. */
+  renameTab: {
+    input: z
+      .object({ terminalId: z.string(), title: z.string().nullable() })
+      .strict(),
+    output: z.object({ snapshot: snapshotSchema }),
   },
   /** Kill this tab's shell and start a fresh one in the same directory. */
   restartTab: {
@@ -312,6 +326,15 @@ export default async function plugin(bb: BbPluginApi) {
     return segments[segments.length - 1] ?? cwd;
   }
 
+  /**
+   * The name `createSession` stamps on a new session. A session still wearing
+   * it has no shell title of its own, which is how the tab strip knows to keep
+   * showing the directory instead.
+   */
+  function defaultTitle(label: string, hostName: string): string {
+    return hostName === "" ? label : `${label} \u00b7 ${hostName}`;
+  }
+
   /** Last tab state we successfully resolved, per terminal id. */
   const lastKnownTabs = new Map<string, Tab>();
 
@@ -341,14 +364,21 @@ export default async function plugin(bb: BbPluginApi) {
           if (!isLiveStatus(session.status)) return null;
           const scope =
             scopes.find((item) => item.key === entry.scopeKey) ?? null;
+          const label = scope?.label ?? labelFromCwd(session.initialCwd);
+          const hostName = scope?.hostName ?? "";
           const tab: Tab = {
             terminalId: session.id,
             scopeKey: entry.scopeKey,
-            label: scope?.label ?? labelFromCwd(session.initialCwd),
-            hostName: scope?.hostName ?? "",
+            label,
+            hostName,
             cwd: session.initialCwd,
             status: session.status,
             exitCode: session.exitCode,
+            shellTitle: meaningfulShellTitle(session.title, {
+              label,
+              defaultTitle: defaultTitle(label, hostName),
+              cwd: session.initialCwd,
+            }),
           };
           lastKnownTabs.set(tab.terminalId, tab);
           return tab;
@@ -407,7 +437,7 @@ export default async function plugin(bb: BbPluginApi) {
         rows,
         scope: { kind: "host_path", hostId: scope.hostId, cwd: scope.cwd },
         // `bb terminal list` has no grouping to lean on, so name the machine here.
-        title: `${scope.label} · ${scope.hostName}`,
+        title: defaultTitle(scope.label, scope.hostName),
       }),
       CREATE_TIMEOUT_MS,
       "terminals.create",
@@ -421,6 +451,7 @@ export default async function plugin(bb: BbPluginApi) {
       cwd: created.initialCwd,
       status: created.status,
       exitCode: created.exitCode,
+      shellTitle: null,
     };
   }
 
@@ -489,6 +520,42 @@ export default async function plugin(bb: BbPluginApi) {
     async setActiveTab({ terminalId }) {
       await bb.storage.kv.set(ACTIVE_TAB_KEY, terminalId);
       return { ok: true };
+    },
+
+    renameTab({ terminalId, title }) {
+      return serialize(async () => {
+        const stored = await readStoredTabs();
+        const entry = stored.find((tab) => tab.terminalId === terminalId);
+        // Renaming a tab this window does not own would let a stale client
+        // rename somebody else's session out from under them.
+        if (entry === undefined) return { snapshot: await snapshot() };
+
+        // Null means "go back to the name the tab was opened with", which is
+        // what the tab strip falls back to showing.
+        const scope = (await listScopes()).find(
+          (item) => item.key === entry.scopeKey,
+        );
+        const restored =
+          scope === undefined
+            ? null
+            : defaultTitle(scope.label, scope.hostName);
+        const next = title ?? restored;
+        if (next === null) return { snapshot: await snapshot() };
+
+        try {
+          await withTimeout(
+            bb.sdk.terminals.rename({ terminalId, title: next }),
+            SDK_TIMEOUT_MS,
+            "terminals.rename",
+          );
+        } catch {
+          // A name is not worth failing a turn over; the next snapshot still
+          // carries whatever the session actually holds.
+          return { snapshot: await snapshot() };
+        }
+        await bumpRevision();
+        return { snapshot: await snapshot() };
+      });
     },
 
     restartTab({ terminalId, cols, rows }) {
