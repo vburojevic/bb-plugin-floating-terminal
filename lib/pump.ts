@@ -21,6 +21,7 @@ import {
   encodeInputChunks,
   normalizeTerminalTitle,
 } from "./terminal-io";
+import { controlCode } from "./keys";
 import { resolveMonoFont, resolveTerminalTheme } from "./theme";
 
 type Rpc = PluginRpcClient<typeof rpcContract>;
@@ -48,6 +49,8 @@ export interface PumpOptions {
   onToggleRequested: () => void;
   /** A meaningful OSC title the shell set, already normalised. Null clears it. */
   onTitle?: (title: string | null) => void;
+  /** The armed-Ctrl latch changed, so the bar can show it. */
+  onCtrlArmed?: (armed: boolean) => void;
 }
 
 export class TerminalPump {
@@ -82,6 +85,8 @@ export class TerminalPump {
    * without this the shell receives a burst of synthetic input on every attach.
    */
   private replayWrites = 0;
+  /** Ctrl held by the on-screen bar, consumed by the next character typed. */
+  private ctrlArmed = false;
 
   constructor(options: PumpOptions) {
     this.options = options;
@@ -126,16 +131,7 @@ export class TerminalPump {
 
     this.terminal.onData((data) => {
       if (this.replayWrites > 0) return;
-      if (this.status === "exited" && data.includes("\r")) {
-        // Latched: the pump stays "exited" for the whole restart round trip,
-        // so without this every extra Enter fires another restart, and each
-        // one creates a PTY the tab strip will never show.
-        if (this.restartRequested) return;
-        this.restartRequested = true;
-        this.options.onRequestRestart();
-        return;
-      }
-      this.queueInput(data);
+      this.handleInput(data);
     });
 
     this.terminal.onResize(({ cols, rows }) => {
@@ -144,6 +140,16 @@ export class TerminalPump {
 
     this.terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown") return true;
+      // A phone keyboard has no Ctrl, so the bar arms one and the next
+      // character typed on the software keyboard becomes its control code.
+      if (this.ctrlArmed && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        const code = controlCode(event.key);
+        if (code !== null) {
+          this.setCtrlArmed(false);
+          this.handleInput(code);
+          return false;
+        }
+      }
       if (event.ctrlKey && event.key === "`") {
         this.options.onToggleRequested();
         return false;
@@ -217,6 +223,44 @@ export class TerminalPump {
     this.terminal.write(bytes, () => {
       this.replayWrites -= 1;
     });
+  }
+
+  /**
+   * Everything the shell receives goes through here — real keystrokes and the
+   * on-screen bar alike — so the dead-prompt restart works from both.
+   */
+  private handleInput(data: string): void {
+    if (this.disposed) return;
+    if (this.status === "exited" && data.includes("\r")) {
+      // Latched: the pump stays "exited" for the whole restart round trip, so
+      // without this every extra Enter fires another restart, and each one
+      // creates a PTY the tab strip will never show.
+      if (this.restartRequested) return;
+      this.restartRequested = true;
+      this.options.onRequestRestart();
+      return;
+    }
+    this.queueInput(data);
+  }
+
+  /** Write bytes as if they had been typed. Used by the on-screen key bar. */
+  send(data: string): void {
+    this.handleInput(data);
+  }
+
+  /** True when the program asked for SS3 arrows (vim, less, anything full-screen). */
+  applicationCursorKeys(): boolean {
+    return this.terminal.modes.applicationCursorKeysMode;
+  }
+
+  setCtrlArmed(armed: boolean): void {
+    if (this.ctrlArmed === armed) return;
+    this.ctrlArmed = armed;
+    this.options.onCtrlArmed?.(armed);
+  }
+
+  blur(): void {
+    this.terminal.blur();
   }
 
   private setStatus(status: TabStatus, detail: string | null = null): void {

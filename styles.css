@@ -198,3 +198,81 @@
     max-width: 6rem;
   }
 }
+
+/*
+ * The on-screen key bar.
+ *
+ * Geometry lives here rather than in utility classes for the reason above — and
+ * because these are touch targets, where being silently ignored is the
+ * difference between a usable terminal and a decorative one. 40px is the floor
+ * Apple's HIG puts on a hit target; the bar scrolls horizontally rather than
+ * wrapping, so the row height never changes under a thumb.
+ */
+.bb-ft-window .bb-ft-keybar {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding: 6px;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.bb-ft-window .bb-ft-keybar::-webkit-scrollbar {
+  display: none;
+}
+
+.bb-ft-window .bb-ft-key {
+  flex: 0 0 auto;
+  min-width: 40px;
+  height: 40px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  /* A key repeated by a thumb must not select its own label, and iOS must not
+     flash its tap highlight over a control that is already giving feedback. */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+.bb-ft-window .bb-ft-key:active {
+  background: var(--state-active, var(--muted));
+  color: var(--foreground);
+}
+
+.bb-ft-window .bb-ft-key-strong {
+  color: var(--foreground);
+}
+
+/* Armed Ctrl has to be obvious: it silently changes what the next key does. */
+.bb-ft-window .bb-ft-key-armed {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+/*
+ * Keyboard-aware height. visualViewport reports the part of the page the
+ * keyboard has not covered; without this the sheet keeps its full height and
+ * the prompt sits behind the keys. The offset matters too — iOS scrolls the
+ * layout viewport under the visual one, and a fixed element follows the layout
+ * viewport.
+ */
+.bb-ft-window[data-layout="sheet"] {
+  top: calc(var(--bb-ft-viewport-top, 0px) + var(--bb-ft-sheet-top));
+  height: calc(
+    var(--bb-ft-viewport-height, 100dvh) - var(--bb-ft-sheet-top) -
+      var(--bb-ft-sheet-bottom)
+  );
+}
+
+/* The home-indicator inset is already inside the keyboard; counting it twice
+   leaves a dead strip above the keys. */
+.bb-ft-window[data-layout="sheet"][data-keyboard="open"] {
+  --bb-ft-sheet-bottom: var(--bb-ft-sheet-gap);
+}

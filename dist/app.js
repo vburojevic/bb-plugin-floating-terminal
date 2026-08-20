@@ -5913,6 +5913,82 @@ function ShellPicker({
   );
 }
 
+// lib/keys.ts
+function controlCode(key) {
+  if (key.length !== 1) return null;
+  if (key === "?") return "\x7F";
+  if (key === " ") return "\0";
+  const code = key.toUpperCase().charCodeAt(0);
+  if (code >= 64 && code <= 95) return String.fromCharCode(code - 64);
+  return null;
+}
+var ARROW_FINAL = {
+  up: "A",
+  down: "B",
+  right: "C",
+  left: "D"
+};
+function arrowSequence(direction, applicationCursorKeys) {
+  return `\x1B${applicationCursorKeys ? "O" : "["}${ARROW_FINAL[direction]}`;
+}
+var TOOLBAR_KEYS = [
+  { id: "esc", label: "esc", title: "Escape", kind: "send", send: "\x1B", emphasis: true },
+  { id: "tab", label: "tab", title: "Tab", kind: "send", send: "	", emphasis: true },
+  { id: "ctrl", label: "ctrl", title: "Control", kind: "modifier", emphasis: true },
+  { id: "left", label: "\u2190", title: "Left", kind: "arrow", direction: "left" },
+  { id: "up", label: "\u2191", title: "Up", kind: "arrow", direction: "up" },
+  { id: "down", label: "\u2193", title: "Down", kind: "arrow", direction: "down" },
+  { id: "right", label: "\u2192", title: "Right", kind: "arrow", direction: "right" },
+  { id: "ctrl-c", label: "^C", title: "Interrupt (Ctrl+C)", kind: "send", send: "", emphasis: true },
+  { id: "ctrl-d", label: "^D", title: "End of file (Ctrl+D)", kind: "send", send: "" },
+  { id: "ctrl-z", label: "^Z", title: "Suspend (Ctrl+Z)", kind: "send", send: "" },
+  { id: "home", label: "home", title: "Start of line", kind: "send", send: "" },
+  { id: "end", label: "end", title: "End of line", kind: "send", send: "" },
+  { id: "pipe", label: "|", title: "Pipe", kind: "send", send: "|" },
+  { id: "tilde", label: "~", title: "Tilde", kind: "send", send: "~" },
+  { id: "slash", label: "/", title: "Slash", kind: "send", send: "/" },
+  { id: "dash", label: "-", title: "Dash", kind: "send", send: "-" },
+  { id: "underscore", label: "_", title: "Underscore", kind: "send", send: "_" },
+  { id: "paste", label: "paste", title: "Paste from clipboard", kind: "action" },
+  { id: "dismiss", label: "\u2304", title: "Hide keyboard", kind: "action", emphasis: true }
+];
+
+// components/key-toolbar.tsx
+function KeyToolbar({ ctrlArmed, onKey }) {
+  return /* @__PURE__ */ jsx(
+    "div",
+    {
+      className: "bb-ft-keybar flex shrink-0 items-center gap-1 border-t border-border bg-muted/40",
+      role: "toolbar",
+      "aria-label": "Terminal keys",
+      "data-no-drag": "",
+      children: TOOLBAR_KEYS.map((key) => {
+        const armed = key.id === "ctrl" && ctrlArmed;
+        return /* @__PURE__ */ jsx(
+          "button",
+          {
+            type: "button",
+            title: key.title,
+            "aria-label": key.title,
+            "aria-pressed": key.kind === "modifier" ? armed : void 0,
+            onPointerDown: (event) => {
+              event.preventDefault();
+              onKey(key);
+            },
+            className: cn(
+              "bb-ft-key",
+              key.emphasis ? "bb-ft-key-strong" : null,
+              armed ? "bb-ft-key-armed" : null
+            ),
+            children: key.label
+          },
+          key.id
+        );
+      })
+    }
+  );
+}
+
 // node_modules/class-variance-authority/dist/index.mjs
 var falsyToString = (value) => typeof value === "boolean" ? `${value}` : value === 0 ? "0" : value;
 var cx = clsx;
@@ -20898,6 +20974,8 @@ var TerminalPump = class {
    * without this the shell receives a burst of synthetic input on every attach.
    */
   replayWrites = 0;
+  /** Ctrl held by the on-screen bar, consumed by the next character typed. */
+  ctrlArmed = false;
   constructor(options) {
     this.options = options;
     const theme = resolveTerminalTheme(options.container);
@@ -20932,19 +21010,21 @@ var TerminalPump = class {
     });
     this.terminal.onData((data) => {
       if (this.replayWrites > 0) return;
-      if (this.status === "exited" && data.includes("\r")) {
-        if (this.restartRequested) return;
-        this.restartRequested = true;
-        this.options.onRequestRestart();
-        return;
-      }
-      this.queueInput(data);
+      this.handleInput(data);
     });
     this.terminal.onResize(({ cols, rows }) => {
       this.scheduleResize(cols, rows);
     });
     this.terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown") return true;
+      if (this.ctrlArmed && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        const code = controlCode(event.key);
+        if (code !== null) {
+          this.setCtrlArmed(false);
+          this.handleInput(code);
+          return false;
+        }
+      }
       if (event.ctrlKey && event.key === "`") {
         this.options.onToggleRequested();
         return false;
@@ -21008,6 +21088,36 @@ var TerminalPump = class {
     this.terminal.write(bytes, () => {
       this.replayWrites -= 1;
     });
+  }
+  /**
+   * Everything the shell receives goes through here — real keystrokes and the
+   * on-screen bar alike — so the dead-prompt restart works from both.
+   */
+  handleInput(data) {
+    if (this.disposed) return;
+    if (this.status === "exited" && data.includes("\r")) {
+      if (this.restartRequested) return;
+      this.restartRequested = true;
+      this.options.onRequestRestart();
+      return;
+    }
+    this.queueInput(data);
+  }
+  /** Write bytes as if they had been typed. Used by the on-screen key bar. */
+  send(data) {
+    this.handleInput(data);
+  }
+  /** True when the program asked for SS3 arrows (vim, less, anything full-screen). */
+  applicationCursorKeys() {
+    return this.terminal.modes.applicationCursorKeysMode;
+  }
+  setCtrlArmed(armed) {
+    if (this.ctrlArmed === armed) return;
+    this.ctrlArmed = armed;
+    this.options.onCtrlArmed?.(armed);
+  }
+  blur() {
+    this.terminal.blur();
   }
   setStatus(status, detail = null) {
     if (this.status === status && detail === null) return;
@@ -21224,6 +21334,7 @@ function TerminalView({
   fitVersion,
   onStatus,
   onTitle,
+  onCtrlArmed,
   onRequestRestart,
   onToggleRequested,
   onPumpReady,
@@ -21234,10 +21345,17 @@ function TerminalView({
   const handlersRef = useRef({
     onStatus,
     onTitle,
+    onCtrlArmed,
     onRequestRestart,
     onToggleRequested
   });
-  handlersRef.current = { onStatus, onTitle, onRequestRestart, onToggleRequested };
+  handlersRef.current = {
+    onStatus,
+    onTitle,
+    onCtrlArmed,
+    onRequestRestart,
+    onToggleRequested
+  };
   useEffect(() => {
     const container = containerRef.current;
     if (container === null) return;
@@ -21248,6 +21366,7 @@ function TerminalView({
       fontSize,
       onStatus: (status, detail) => handlersRef.current.onStatus(terminalId, status, detail),
       onTitle: (title) => handlersRef.current.onTitle(terminalId, title),
+      onCtrlArmed: (armed) => handlersRef.current.onCtrlArmed(armed),
       onRequestRestart: () => handlersRef.current.onRequestRestart(terminalId),
       onToggleRequested: () => handlersRef.current.onToggleRequested()
     });
@@ -21481,6 +21600,40 @@ function createRpcClient(pluginId) {
   };
 }
 
+// lib/viewport.ts
+var HEIGHT_VAR = "--bb-ft-viewport-height";
+var TOP_VAR = "--bb-ft-viewport-top";
+var KEYBOARD_MIN_PX = 120;
+function trackVisualViewport(element, onChange) {
+  const viewport = window.visualViewport;
+  if (viewport === void 0 || viewport === null) {
+    return () => {
+    };
+  }
+  let lastKeyboardOpen = null;
+  const apply = () => {
+    element.style.setProperty(HEIGHT_VAR, `${Math.round(viewport.height)}px`);
+    element.style.setProperty(TOP_VAR, `${Math.round(viewport.offsetTop)}px`);
+    const hidden = window.innerHeight - viewport.height - viewport.offsetTop;
+    const keyboardOpen = hidden > KEYBOARD_MIN_PX;
+    element.dataset.keyboard = keyboardOpen ? "open" : "closed";
+    if (keyboardOpen !== lastKeyboardOpen) {
+      lastKeyboardOpen = keyboardOpen;
+      onChange?.({ keyboardOpen });
+    }
+  };
+  apply();
+  viewport.addEventListener("resize", apply);
+  viewport.addEventListener("scroll", apply);
+  return () => {
+    viewport.removeEventListener("resize", apply);
+    viewport.removeEventListener("scroll", apply);
+    element.style.removeProperty(HEIGHT_VAR);
+    element.style.removeProperty(TOP_VAR);
+    delete element.dataset.keyboard;
+  };
+}
+
 // components/floating-terminal.tsx
 var PLUGIN_ID = "floating-terminal";
 var EDGE_CLASS = {
@@ -21544,6 +21697,7 @@ function FloatingTerminal() {
   const [shortcutEnabled, setShortcutEnabled] = useState(true);
   const [themeVersion, setThemeVersion] = useState(0);
   const [fitVersion, setFitVersion] = useState(0);
+  const [ctrlArmed, setCtrlArmed] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [armed, setArmed] = useState(false);
   const rootRef = useRef(null);
@@ -21652,6 +21806,9 @@ function FloatingTerminal() {
     },
     [rpc, sync, geometry]
   );
+  useEffect(() => {
+    setCtrlArmed(false);
+  }, [state.activeId]);
   const selectTab = useCallback(
     (terminalId) => {
       dispatch({ type: "activated", terminalId });
@@ -21704,6 +21861,13 @@ function FloatingTerminal() {
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, [applyFrame]);
+  useEffect(() => {
+    const node = rootRef.current;
+    if (!sheet || node === null) return;
+    return trackVisualViewport(node, () => {
+      setFitVersion((version4) => version4 + 1);
+    });
+  }, [sheet, mounted]);
   useEffect(() => {
     const observer = new MutationObserver(
       () => setThemeVersion((version4) => version4 + 1)
@@ -21771,6 +21935,45 @@ function FloatingTerminal() {
     []
   );
   const hide = useCallback(() => windowController.hide(), []);
+  const activePump = useCallback(() => {
+    const activeId = activeIdRef.current;
+    if (activeId === null) return null;
+    return pumps.current.get(activeId) ?? null;
+  }, []);
+  const onToolbarKey = useCallback(
+    (key) => {
+      const pump = activePump();
+      if (pump === null) return;
+      switch (key.kind) {
+        case "send":
+          pump.send(key.send ?? "");
+          return;
+        case "arrow":
+          pump.send(
+            arrowSequence(key.direction ?? "up", pump.applicationCursorKeys())
+          );
+          return;
+        case "modifier":
+          pump.setCtrlArmed(!ctrlArmed);
+          return;
+        case "action":
+          if (key.id === "dismiss") {
+            pump.blur();
+            return;
+          }
+          if (key.id === "paste") {
+            void navigator.clipboard?.readText().then((text) => {
+              if (text !== "") pump.send(text);
+            }).catch(() => {
+              toast.error("Clipboard is not available here.");
+            });
+          }
+          return;
+      }
+    },
+    [activePump, ctrlArmed]
+  );
+  const onCtrlArmed = useCallback((armed2) => setCtrlArmed(armed2), []);
   const showHosts = new Set(scopes.map((scope) => scope.hostName)).size > 1;
   if (!mounted) return null;
   return /* @__PURE__ */ jsxs(TooltipProvider2, { delayDuration: 400, children: [
@@ -21824,6 +22027,7 @@ function FloatingTerminal() {
                 fitVersion,
                 onStatus,
                 onTitle,
+                onCtrlArmed,
                 onRequestRestart,
                 onToggleRequested: hide,
                 onPumpReady,
@@ -21841,6 +22045,7 @@ function FloatingTerminal() {
               }
             ) : null
           ] }),
+          sheet && state.tabs.length > 0 ? /* @__PURE__ */ jsx(KeyToolbar, { ctrlArmed, onKey: onToolbarKey }) : null,
           sheet ? null : RESIZE_EDGES.map((edge) => /* @__PURE__ */ jsx(
             "div",
             {

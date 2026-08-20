@@ -65,6 +65,25 @@ desktop idea in the wrong clothes; at that width it either covers everything
 anyway or is too small to read, and the drag handle only fights the scroll
 gesture. Tapping the backdrop hides it, the same as the close button.
 
+**It gets out of the keyboard's way.** Opening the software keyboard does not
+change the layout viewport on iOS, so a fixed element keeps its full height and
+the prompt ends up behind the keys. The sheet takes its height and offset from
+`visualViewport` instead, so it shrinks to whatever is still visible and the
+prompt stays where you can see it.
+
+**And it brings the keys a phone does not have.** A row of them sits at the
+bottom of the sheet — which is exactly where the keyboard pushes it, so it lands
+directly above the keys:
+
+`esc` `tab` `ctrl` `←` `↑` `↓` `→` `^C` `^D` `^Z` `home` `end` `|` `~` `/` `-`
+`_` `paste`, and one to dismiss the keyboard.
+
+Ctrl is a latch, not a chord — you cannot hold two keys on a touch screen — so
+tapping it arms the modifier and the next character you type becomes its control
+code. Arrows ask the terminal whether it is in application-cursor mode, so they
+work in `vim` and `less` as well as at the prompt. Tapping a key does not steal
+focus, so the keyboard stays up while you use the bar.
+
 ### It looks like the rest of your bb
 
 ![The same window in bb's light theme](docs/media/light.png)
@@ -103,6 +122,8 @@ server.ts                     RPC over bb.sdk.terminals; tab list in kv
 lib/pump.ts                   one xterm <-> one PTY
 lib/tabs.ts                   pure reducer for the tab strip
 lib/terminal-io.ts            input chunking, shell-title filtering
+lib/keys.ts                   the on-screen key bar's sequences
+lib/viewport.ts               visualViewport -> sheet height, keyboard state
 lib/scopes.ts                 which directories are offered, and in what order
 lib/frame.ts                  drag, resize, clamping, persistence
 lib/theme.ts                  bb's oklch tokens -> an xterm palette

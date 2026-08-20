@@ -22,6 +22,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { useIsCompactViewport } from "@/components/ui/hooks/use-compact-viewport";
 import { ShellPicker } from "@/components/shell-picker";
 import type { ScopeOption } from "@/lib/scopes";
+import { KeyToolbar } from "@/components/key-toolbar";
 import { TabBar } from "@/components/tab-bar";
 import { TerminalView } from "@/components/terminal-view";
 import { windowController } from "@/lib/controller";
@@ -35,7 +36,9 @@ import {
   type Frame,
 } from "@/lib/frame";
 import type { TerminalPump } from "@/lib/pump";
+import { arrowSequence, type ToolbarKey } from "@/lib/keys";
 import { createRpcClient } from "@/lib/rpc";
+import { trackVisualViewport } from "@/lib/viewport";
 import { emptyTabs, tabsReducer, type TabStatus } from "@/lib/tabs";
 import { cn } from "@/lib/utils";
 import type { rpcContract } from "../server";
@@ -137,6 +140,7 @@ export function FloatingTerminal() {
    * out of the DOM until the window is first opened removes that window
    * entirely, and costs nothing for a session where it is never used.
    */
+  const [ctrlArmed, setCtrlArmed] = useState(false);
   const [mounted, setMounted] = useState(false);
   /** One frame behind `mounted`, so the first open still animates in. */
   const [armed, setArmed] = useState(false);
@@ -284,6 +288,10 @@ export function FloatingTerminal() {
     [rpc, sync, geometry],
   );
 
+  useEffect(() => {
+    setCtrlArmed(false);
+  }, [state.activeId]);
+
   const selectTab = useCallback(
     (terminalId: string) => {
       dispatch({ type: "activated", terminalId });
@@ -356,6 +364,18 @@ export function FloatingTerminal() {
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, [applyFrame]);
+
+  // Only the sheet needs this: a desktop window is never covered by a keyboard,
+  // and writing the custom properties there would fight the inline geometry.
+  useEffect(() => {
+    const node = rootRef.current;
+    if (!sheet || node === null) return;
+    return trackVisualViewport(node, () => {
+      // The box just changed under xterm; the pump's ResizeObserver catches the
+      // height, this makes sure the active tab is scrolled back to the prompt.
+      setFitVersion((version) => version + 1);
+    });
+  }, [sheet, mounted]);
 
   useEffect(() => {
     const observer = new MutationObserver(() =>
@@ -444,6 +464,51 @@ export function FloatingTerminal() {
 
   const hide = useCallback(() => windowController.hide(), []);
 
+  const activePump = useCallback((): TerminalPump | null => {
+    const activeId = activeIdRef.current;
+    if (activeId === null) return null;
+    return pumps.current.get(activeId) ?? null;
+  }, []);
+
+  const onToolbarKey = useCallback(
+    (key: ToolbarKey) => {
+      const pump = activePump();
+      if (pump === null) return;
+      switch (key.kind) {
+        case "send":
+          pump.send(key.send ?? "");
+          return;
+        case "arrow":
+          pump.send(
+            arrowSequence(key.direction ?? "up", pump.applicationCursorKeys()),
+          );
+          return;
+        case "modifier":
+          pump.setCtrlArmed(!ctrlArmed);
+          return;
+        case "action":
+          if (key.id === "dismiss") {
+            pump.blur();
+            return;
+          }
+          if (key.id === "paste") {
+            void navigator.clipboard
+              ?.readText()
+              .then((text) => {
+                if (text !== "") pump.send(text);
+              })
+              .catch(() => {
+                toast.error("Clipboard is not available here.");
+              });
+          }
+          return;
+      }
+    },
+    [activePump, ctrlArmed],
+  );
+
+  const onCtrlArmed = useCallback((armed: boolean) => setCtrlArmed(armed), []);
+
   // A bare ~ means nothing once there is more than one machine.
   const showHosts = new Set(scopes.map((scope) => scope.hostName)).size > 1;
 
@@ -504,6 +569,7 @@ export function FloatingTerminal() {
               fitVersion={fitVersion}
               onStatus={onStatus}
               onTitle={onTitle}
+              onCtrlArmed={onCtrlArmed}
               onRequestRestart={onRequestRestart}
               onToggleRequested={hide}
               onPumpReady={onPumpReady}
@@ -519,6 +585,12 @@ export function FloatingTerminal() {
             />
           ) : null}
         </div>
+
+        {/* Only where the keys are actually missing, and only once there is a
+            shell to send them to. */}
+        {sheet && state.tabs.length > 0 ? (
+          <KeyToolbar ctrlArmed={ctrlArmed} onKey={onToolbarKey} />
+        ) : null}
 
         {sheet
           ? null

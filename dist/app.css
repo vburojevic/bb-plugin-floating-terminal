@@ -2324,6 +2324,52 @@
     max-width: 6rem;
   }
 }
+.bb-ft-window .bb-ft-keybar {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding: 6px;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.bb-ft-window .bb-ft-keybar::-webkit-scrollbar {
+  display: none;
+}
+.bb-ft-window .bb-ft-key {
+  flex: 0 0 auto;
+  min-width: 40px;
+  height: 40px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+.bb-ft-window .bb-ft-key:active {
+  background: var(--state-active, var(--muted));
+  color: var(--foreground);
+}
+.bb-ft-window .bb-ft-key-strong {
+  color: var(--foreground);
+}
+.bb-ft-window .bb-ft-key-armed {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+.bb-ft-window[data-layout=sheet] {
+  top: calc(var(--bb-ft-viewport-top, 0px) + var(--bb-ft-sheet-top));
+  height: calc(var(--bb-ft-viewport-height, 100dvh) - var(--bb-ft-sheet-top) - var(--bb-ft-sheet-bottom));
+}
+.bb-ft-window[data-layout=sheet][data-keyboard=open] {
+  --bb-ft-sheet-bottom: var(--bb-ft-sheet-gap);
+}
 /*! Bundled license information:
 
 @xterm/xterm/css/xterm.css:

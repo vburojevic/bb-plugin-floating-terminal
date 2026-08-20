@@ -23,6 +23,8 @@ export interface TerminalViewProps {
   onStatus: (terminalId: string, status: TabStatus, detail: string | null) => void;
   /** A normalised OSC title from the shell, or null when it has none. */
   onTitle: (terminalId: string, title: string | null) => void;
+  /** The on-screen bar's Ctrl latch changed inside this tab's terminal. */
+  onCtrlArmed: (armed: boolean) => void;
   onRequestRestart: (terminalId: string) => void;
   onToggleRequested: () => void;
   onPumpReady: (terminalId: string, pump: TerminalPump) => void;
@@ -38,6 +40,7 @@ export function TerminalView({
   fitVersion,
   onStatus,
   onTitle,
+  onCtrlArmed,
   onRequestRestart,
   onToggleRequested,
   onPumpReady,
@@ -51,10 +54,17 @@ export function TerminalView({
   const handlersRef = useRef({
     onStatus,
     onTitle,
+    onCtrlArmed,
     onRequestRestart,
     onToggleRequested,
   });
-  handlersRef.current = { onStatus, onTitle, onRequestRestart, onToggleRequested };
+  handlersRef.current = {
+    onStatus,
+    onTitle,
+    onCtrlArmed,
+    onRequestRestart,
+    onToggleRequested,
+  };
 
   useEffect(() => {
     const container = containerRef.current;
@@ -68,6 +78,7 @@ export function TerminalView({
       onStatus: (status, detail) =>
         handlersRef.current.onStatus(terminalId, status, detail),
       onTitle: (title) => handlersRef.current.onTitle(terminalId, title),
+      onCtrlArmed: (armed) => handlersRef.current.onCtrlArmed(armed),
       onRequestRestart: () => handlersRef.current.onRequestRestart(terminalId),
       onToggleRequested: () => handlersRef.current.onToggleRequested(),
     });
