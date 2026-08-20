@@ -162,19 +162,26 @@ export function FloatingTerminal() {
   const frameRef = useRef<Frame>(loadFrame());
 
   const applyFrame = useCallback((next: Frame) => {
-    frameRef.current = next;
     const node = rootRef.current;
-    if (node === null) return;
     if (sheetRef.current) {
       // Hand geometry back to the stylesheet. Inline styles outrank a class,
       // so leaving the last desktop frame here would pin the sheet to a
       // 760x460 box in the corner.
-      node.style.removeProperty("left");
-      node.style.removeProperty("top");
-      node.style.removeProperty("width");
-      node.style.removeProperty("height");
+      //
+      // And do not record the frame while the sheet owns layout. Every window
+      // resize runs the stored frame through clampFrame, so at phone width the
+      // remembered *desktop* geometry was being clamped to the phone's — a
+      // window that came back 393px wide the moment the viewport widened again.
+      if (node !== null) {
+        node.style.removeProperty("left");
+        node.style.removeProperty("top");
+        node.style.removeProperty("width");
+        node.style.removeProperty("height");
+      }
       return;
     }
+    frameRef.current = next;
+    if (node === null) return;
     node.style.left = `${next.x}px`;
     node.style.top = `${next.y}px`;
     node.style.width = `${next.width}px`;
@@ -349,7 +356,12 @@ export function FloatingTerminal() {
   // ---------------------------------------------------------- environment
 
   useEffect(() => {
-    applyFrame(frameRef.current);
+    // Coming back from the sheet, re-read the window's own geometry rather than
+    // trusting memory: a frame first computed while the viewport was phone-sized
+    // (a session that started narrow and was widened) would otherwise become a
+    // 360px desktop window. Storage holds the last committed drag, or nothing,
+    // in which case loadFrame derives the default for the viewport we are in now.
+    applyFrame(sheet ? frameRef.current : loadFrame());
     setFitVersion((version) => version + 1);
   }, [applyFrame, mounted, sheet]);
 

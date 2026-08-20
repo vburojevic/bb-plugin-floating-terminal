@@ -21707,16 +21707,18 @@ function FloatingTerminal() {
   const restarting = useRef(/* @__PURE__ */ new Set());
   const frameRef = useRef(loadFrame());
   const applyFrame = useCallback((next) => {
-    frameRef.current = next;
     const node = rootRef.current;
-    if (node === null) return;
     if (sheetRef.current) {
-      node.style.removeProperty("left");
-      node.style.removeProperty("top");
-      node.style.removeProperty("width");
-      node.style.removeProperty("height");
+      if (node !== null) {
+        node.style.removeProperty("left");
+        node.style.removeProperty("top");
+        node.style.removeProperty("width");
+        node.style.removeProperty("height");
+      }
       return;
     }
+    frameRef.current = next;
+    if (node === null) return;
     node.style.left = `${next.x}px`;
     node.style.top = `${next.y}px`;
     node.style.width = `${next.width}px`;
@@ -21848,7 +21850,7 @@ function FloatingTerminal() {
     return () => aborter.abort();
   }, [applyFrame, commitFrame, mounted, sheet]);
   useEffect(() => {
-    applyFrame(frameRef.current);
+    applyFrame(sheet ? frameRef.current : loadFrame());
     setFitVersion((version4) => version4 + 1);
   }, [applyFrame, mounted, sheet]);
   useEffect(() => {
