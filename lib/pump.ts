@@ -21,7 +21,8 @@ import {
   encodeInputChunks,
   normalizeTerminalTitle,
 } from "./terminal-io";
-import { controlCode } from "./keys";
+import { arrowSequence, controlCode } from "./keys";
+import { consumeScrollPixels } from "./scroll";
 import { resolveMonoFont, resolveTerminalTheme } from "./theme";
 
 type Rpc = PluginRpcClient<typeof rpcContract>;
@@ -40,6 +41,16 @@ const UNICODE_VERSION = "11";
 const SYMBOL_FAMILY = '"BB FT Nerd Symbols"';
 /** A Private Use Area sample, so unicode-range actually matches when loading. */
 const SYMBOL_SAMPLE = "\ue0a0";
+/** Under this a drag is a tap, not a scroll. */
+const TOUCH_SLOP_PX = 3;
+/** Per-frame decay of a fling. 0.94 glides for about half a second. */
+const FLING_DECAY = 0.94;
+/** Give up on the fling once it is barely moving. */
+const FLING_MIN_PX = 0.35;
+/** A fling any faster than this is almost certainly a flick, not a drag. */
+const FLING_MAX_PX_PER_FRAME = 90;
+/** Fallback row height, for the tick before the renderer has measured one. */
+const FALLBACK_CELL_PX = 17;
 
 export interface PumpOptions {
   container: HTMLElement;
@@ -91,6 +102,17 @@ export class TerminalPump {
   private replayWrites = 0;
   /** Ctrl held by the on-screen bar, consumed by the next character typed. */
   private ctrlArmed = false;
+  /** In-flight touch drag; see installTouchScroll. */
+  private touch = {
+    active: false,
+    id: -1,
+    lastY: 0,
+    /** Sub-line finger travel carried to the next move, so slow drags still move. */
+    residual: 0,
+    velocity: 0,
+    movedPx: 0,
+  };
+  private flingFrame: number | null = null;
 
   constructor(options: PumpOptions) {
     this.options = options;
@@ -128,6 +150,7 @@ export class TerminalPump {
     this.terminal.open(options.container);
     this.observeContainer();
     this.warmSymbolFont();
+    this.installTouchScroll();
 
     this.terminal.onTitleChange((title) => {
       if (this.replayWrites > 0 || this.disposed) return;
@@ -195,6 +218,135 @@ export class TerminalPump {
       });
     });
     this.resizeObserver.observe(this.options.container);
+  }
+
+  /**
+   * Touch scrolling, which xterm does not have.
+   *
+   * xterm 6 replaced the old overflow-scrolled viewport with VS Code's
+   * SmoothScrollableElement, and that widget only listens for wheel events —
+   * VS Code wires touch into its lists separately, and none of that came
+   * across. So on a touch screen the scrollback is simply unreachable: the
+   * scrollbar renders, and dragging does nothing at all.
+   *
+   * Rather than synthesise wheel events — the widget reads the legacy
+   * `wheelDeltaY` before `deltaY`, so a constructed event is at the mercy of
+   * whatever the browser fills in — this drives xterm's public scrollLines.
+   */
+  private installTouchScroll(): void {
+    const el = this.options.container;
+    const options = { passive: false } as const;
+    el.addEventListener("touchstart", this.onTouchStart, options);
+    el.addEventListener("touchmove", this.onTouchMove, options);
+    el.addEventListener("touchend", this.onTouchEnd, options);
+    el.addEventListener("touchcancel", this.onTouchEnd, options);
+  }
+
+  /** Row height in CSS pixels, derived rather than measured per glyph. */
+  private cellHeight(): number {
+    const screen = this.terminal.element?.querySelector(".xterm-screen");
+    const rows = Math.max(this.terminal.rows, 1);
+    const height = screen instanceof HTMLElement ? screen.clientHeight : 0;
+    return height > 0 ? height / rows : FALLBACK_CELL_PX;
+  }
+
+  /**
+   * Positive scrolls towards the newest output, matching scrollLines. In the
+   * alternate buffer there is no scrollback to move through, so send cursor
+   * keys instead — the same substitution xterm makes for a wheel there, which
+   * is what lets a finger scroll vim, less or tmux.
+   */
+  private scrollByLines(lines: number): void {
+    if (lines === 0) return;
+    if (this.terminal.buffer.active.type === "alternate") {
+      const sequence = arrowSequence(
+        lines > 0 ? "down" : "up",
+        this.terminal.modes.applicationCursorKeysMode,
+      );
+      for (let index = 0; index < Math.min(Math.abs(lines), 8); index += 1) {
+        this.handleInput(sequence);
+      }
+      return;
+    }
+    this.terminal.scrollLines(lines);
+  }
+
+  /** Convert accumulated finger travel into whole lines, keeping the remainder. */
+  private consumePixels(dy: number): void {
+    const step = consumeScrollPixels(this.touch.residual, dy, this.cellHeight());
+    this.touch.residual = step.residual;
+    this.scrollByLines(step.lines);
+  }
+
+  private readonly onTouchStart = (event: TouchEvent): void => {
+    this.stopFling();
+    // Two fingers is a pinch or a system gesture; leave it alone.
+    if (event.touches.length !== 1) {
+      this.touch.active = false;
+      return;
+    }
+    const point = event.touches[0]!;
+    this.touch = {
+      active: true,
+      id: point.identifier,
+      lastY: point.clientY,
+      residual: 0,
+      velocity: 0,
+      movedPx: 0,
+    };
+  };
+
+  private readonly onTouchMove = (event: TouchEvent): void => {
+    if (!this.touch.active || this.disposed) return;
+    const point = Array.from(event.touches).find(
+      (candidate) => candidate.identifier === this.touch.id,
+    );
+    if (point === undefined) return;
+
+    // Dragging the content down walks back through history, the way dragging a
+    // page down does — so a downward finger is a negative line delta.
+    const dy = this.touch.lastY - point.clientY;
+    this.touch.lastY = point.clientY;
+    this.touch.movedPx += Math.abs(dy);
+    if (this.touch.movedPx < TOUCH_SLOP_PX) return;
+
+    // Past the slop this is a scroll, so keep the page and the sheet still.
+    event.preventDefault();
+    this.touch.velocity = dy;
+    this.consumePixels(dy);
+  };
+
+  private readonly onTouchEnd = (): void => {
+    if (!this.touch.active) return;
+    this.touch.active = false;
+    if (this.touch.movedPx < TOUCH_SLOP_PX) return;
+    const velocity = Math.max(
+      -FLING_MAX_PX_PER_FRAME,
+      Math.min(FLING_MAX_PX_PER_FRAME, this.touch.velocity),
+    );
+    if (Math.abs(velocity) < FLING_MIN_PX) return;
+    this.startFling(velocity);
+  };
+
+  private startFling(initial: number): void {
+    let velocity = initial;
+    const step = (): void => {
+      if (this.disposed) return;
+      this.consumePixels(velocity);
+      velocity *= FLING_DECAY;
+      if (Math.abs(velocity) < FLING_MIN_PX) {
+        this.flingFrame = null;
+        return;
+      }
+      this.flingFrame = window.requestAnimationFrame(step);
+    };
+    this.flingFrame = window.requestAnimationFrame(step);
+  }
+
+  private stopFling(): void {
+    if (this.flingFrame === null) return;
+    window.cancelAnimationFrame(this.flingFrame);
+    this.flingFrame = null;
   }
 
   /**
@@ -538,6 +690,12 @@ export class TerminalPump {
 
   dispose(): void {
     this.disposed = true;
+    this.stopFling();
+    const el = this.options.container;
+    el.removeEventListener("touchstart", this.onTouchStart);
+    el.removeEventListener("touchmove", this.onTouchMove);
+    el.removeEventListener("touchend", this.onTouchEnd);
+    el.removeEventListener("touchcancel", this.onTouchEnd);
     this.stopPolling();
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;

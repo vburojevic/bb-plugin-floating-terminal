@@ -84,6 +84,14 @@ code. Arrows ask the terminal whether it is in application-cursor mode, so they
 work in `vim` and `less` as well as at the prompt. Tapping a key does not steal
 focus, so the keyboard stays up while you use the bar.
 
+**And you can scroll it with a finger**, which xterm itself cannot do: xterm 6
+moved its viewport onto a scrollable widget that only listens for wheel events,
+so on a touch screen the scrollbar renders and dragging does nothing. Dragging
+here scrolls the scrollback and keeps a little momentum after you let go. In the
+alternate screen — `vim`, `less`, `tmux` — there is no scrollback to move
+through, so a drag sends cursor keys instead, the same substitution xterm makes
+for a wheel there.
+
 ### It looks like the rest of your bb
 
 ![The same window in bb's light theme](docs/media/light.png)
@@ -131,6 +139,7 @@ lib/pump.ts                   one xterm <-> one PTY
 lib/tabs.ts                   pure reducer for the tab strip
 lib/terminal-io.ts            input chunking, shell-title filtering
 lib/keys.ts                   the on-screen key bar's sequences
+lib/scroll.ts                 finger travel -> whole terminal lines
 lib/viewport.ts               visualViewport -> sheet height, keyboard state
 lib/scopes.ts                 which directories are offered, and in what order
 lib/frame.ts                  drag, resize, clamping, persistence

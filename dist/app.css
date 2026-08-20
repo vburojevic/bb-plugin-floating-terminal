@@ -2396,6 +2396,11 @@
 .bb-ft-backdrop {
   z-index: 54;
 }
+@media (pointer: coarse) {
+  .bb-ft-window .xterm {
+    touch-action: none;
+  }
+}
 /*! Bundled license information:
 
 @xterm/xterm/css/xterm.css:

@@ -20814,6 +20814,16 @@ function normalizeTerminalTitle(title) {
   return trimmed.slice(0, TITLE_MAX_LENGTH);
 }
 
+// lib/scroll.ts
+function consumeScrollPixels(residual, dy, cellHeight) {
+  if (!Number.isFinite(cellHeight) || cellHeight <= 0) {
+    return { lines: 0, residual };
+  }
+  const total = residual + dy;
+  const lines = Math.trunc(total / cellHeight) || 0;
+  return { lines, residual: total - lines * cellHeight };
+}
+
 // lib/theme.ts
 var probeCanvas = null;
 function toHex(cssColor, fallback) {
@@ -20946,6 +20956,11 @@ var SCROLLBACK_LINES = 1e4;
 var UNICODE_VERSION = "11";
 var SYMBOL_FAMILY = '"BB FT Nerd Symbols"';
 var SYMBOL_SAMPLE = "\uE0A0";
+var TOUCH_SLOP_PX = 3;
+var FLING_DECAY = 0.94;
+var FLING_MIN_PX = 0.35;
+var FLING_MAX_PX_PER_FRAME = 90;
+var FALLBACK_CELL_PX = 17;
 var TerminalPump = class {
   terminal;
   fitAddon = new o();
@@ -20979,6 +20994,17 @@ var TerminalPump = class {
   replayWrites = 0;
   /** Ctrl held by the on-screen bar, consumed by the next character typed. */
   ctrlArmed = false;
+  /** In-flight touch drag; see installTouchScroll. */
+  touch = {
+    active: false,
+    id: -1,
+    lastY: 0,
+    /** Sub-line finger travel carried to the next move, so slow drags still move. */
+    residual: 0,
+    velocity: 0,
+    movedPx: 0
+  };
+  flingFrame = null;
   constructor(options) {
     this.options = options;
     const theme = resolveTerminalTheme(options.container);
@@ -21008,6 +21034,7 @@ var TerminalPump = class {
     this.terminal.open(options.container);
     this.observeContainer();
     this.warmSymbolFont();
+    this.installTouchScroll();
     this.terminal.onTitleChange((title) => {
       if (this.replayWrites > 0 || this.disposed) return;
       this.options.onTitle?.(normalizeTerminalTitle(title));
@@ -21061,6 +21088,120 @@ var TerminalPump = class {
       });
     });
     this.resizeObserver.observe(this.options.container);
+  }
+  /**
+   * Touch scrolling, which xterm does not have.
+   *
+   * xterm 6 replaced the old overflow-scrolled viewport with VS Code's
+   * SmoothScrollableElement, and that widget only listens for wheel events —
+   * VS Code wires touch into its lists separately, and none of that came
+   * across. So on a touch screen the scrollback is simply unreachable: the
+   * scrollbar renders, and dragging does nothing at all.
+   *
+   * Rather than synthesise wheel events — the widget reads the legacy
+   * `wheelDeltaY` before `deltaY`, so a constructed event is at the mercy of
+   * whatever the browser fills in — this drives xterm's public scrollLines.
+   */
+  installTouchScroll() {
+    const el2 = this.options.container;
+    const options = { passive: false };
+    el2.addEventListener("touchstart", this.onTouchStart, options);
+    el2.addEventListener("touchmove", this.onTouchMove, options);
+    el2.addEventListener("touchend", this.onTouchEnd, options);
+    el2.addEventListener("touchcancel", this.onTouchEnd, options);
+  }
+  /** Row height in CSS pixels, derived rather than measured per glyph. */
+  cellHeight() {
+    const screen = this.terminal.element?.querySelector(".xterm-screen");
+    const rows = Math.max(this.terminal.rows, 1);
+    const height = screen instanceof HTMLElement ? screen.clientHeight : 0;
+    return height > 0 ? height / rows : FALLBACK_CELL_PX;
+  }
+  /**
+   * Positive scrolls towards the newest output, matching scrollLines. In the
+   * alternate buffer there is no scrollback to move through, so send cursor
+   * keys instead — the same substitution xterm makes for a wheel there, which
+   * is what lets a finger scroll vim, less or tmux.
+   */
+  scrollByLines(lines) {
+    if (lines === 0) return;
+    if (this.terminal.buffer.active.type === "alternate") {
+      const sequence = arrowSequence(
+        lines > 0 ? "down" : "up",
+        this.terminal.modes.applicationCursorKeysMode
+      );
+      for (let index = 0; index < Math.min(Math.abs(lines), 8); index += 1) {
+        this.handleInput(sequence);
+      }
+      return;
+    }
+    this.terminal.scrollLines(lines);
+  }
+  /** Convert accumulated finger travel into whole lines, keeping the remainder. */
+  consumePixels(dy) {
+    const step = consumeScrollPixels(this.touch.residual, dy, this.cellHeight());
+    this.touch.residual = step.residual;
+    this.scrollByLines(step.lines);
+  }
+  onTouchStart = (event) => {
+    this.stopFling();
+    if (event.touches.length !== 1) {
+      this.touch.active = false;
+      return;
+    }
+    const point = event.touches[0];
+    this.touch = {
+      active: true,
+      id: point.identifier,
+      lastY: point.clientY,
+      residual: 0,
+      velocity: 0,
+      movedPx: 0
+    };
+  };
+  onTouchMove = (event) => {
+    if (!this.touch.active || this.disposed) return;
+    const point = Array.from(event.touches).find(
+      (candidate) => candidate.identifier === this.touch.id
+    );
+    if (point === void 0) return;
+    const dy = this.touch.lastY - point.clientY;
+    this.touch.lastY = point.clientY;
+    this.touch.movedPx += Math.abs(dy);
+    if (this.touch.movedPx < TOUCH_SLOP_PX) return;
+    event.preventDefault();
+    this.touch.velocity = dy;
+    this.consumePixels(dy);
+  };
+  onTouchEnd = () => {
+    if (!this.touch.active) return;
+    this.touch.active = false;
+    if (this.touch.movedPx < TOUCH_SLOP_PX) return;
+    const velocity = Math.max(
+      -FLING_MAX_PX_PER_FRAME,
+      Math.min(FLING_MAX_PX_PER_FRAME, this.touch.velocity)
+    );
+    if (Math.abs(velocity) < FLING_MIN_PX) return;
+    this.startFling(velocity);
+  };
+  startFling(initial) {
+    let velocity = initial;
+    const step = () => {
+      if (this.disposed) return;
+      this.consumePixels(velocity);
+      velocity *= FLING_DECAY;
+      if (Math.abs(velocity) < FLING_MIN_PX) {
+        this.flingFrame = null;
+        return;
+      }
+      this.flingFrame = window.requestAnimationFrame(step);
+    };
+    this.flingFrame = window.requestAnimationFrame(step);
+  }
+  stopFling() {
+    if (this.flingFrame === null) return;
+    window.cancelAnimationFrame(this.flingFrame);
+    this.flingFrame = null;
   }
   /**
    * The renderer rasterises each glyph once into a texture atlas and caches it
@@ -21340,6 +21481,12 @@ var TerminalPump = class {
   }
   dispose() {
     this.disposed = true;
+    this.stopFling();
+    const el2 = this.options.container;
+    el2.removeEventListener("touchstart", this.onTouchStart);
+    el2.removeEventListener("touchmove", this.onTouchMove);
+    el2.removeEventListener("touchend", this.onTouchEnd);
+    el2.removeEventListener("touchcancel", this.onTouchEnd);
     this.stopPolling();
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;

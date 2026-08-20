@@ -300,3 +300,18 @@
 .bb-ft-backdrop {
   z-index: 54;
 }
+
+/*
+ * The terminal owns vertical dragging on a touch screen.
+ *
+ * xterm 6 has no touch scrolling of its own, so lib/pump.ts translates a drag
+ * into scrollLines. For that to be reliable the browser must not claim the
+ * gesture first — with the default touch-action it starts panning and the
+ * touchmove handler never gets to preventDefault in time. Scoped to coarse
+ * pointers so a mouse and a trackpad keep every native behaviour.
+ */
+@media (pointer: coarse) {
+  .bb-ft-window .xterm {
+    touch-action: none;
+  }
+}
