@@ -36,6 +36,10 @@ const RESIZE_DEBOUNCE_MS = 90;
 const SCROLLBACK_LINES = 10_000;
 /** Matches bb's terminal, whose wide-glyph widths come from Unicode 11. */
 const UNICODE_VERSION = "11";
+/** The bundled fallback in fonts/nerd-symbols.css. */
+const SYMBOL_FAMILY = '"BB FT Nerd Symbols"';
+/** A Private Use Area sample, so unicode-range actually matches when loading. */
+const SYMBOL_SAMPLE = "\ue0a0";
 
 export interface PumpOptions {
   container: HTMLElement;
@@ -123,6 +127,7 @@ export class TerminalPump {
     this.loadWebglRenderer();
     this.terminal.open(options.container);
     this.observeContainer();
+    this.warmSymbolFont();
 
     this.terminal.onTitleChange((title) => {
       if (this.replayWrites > 0 || this.disposed) return;
@@ -190,6 +195,33 @@ export class TerminalPump {
       });
     });
     this.resizeObserver.observe(this.options.container);
+  }
+
+  /**
+   * The renderer rasterises each glyph once into a texture atlas and caches it
+   * forever. A webfont that is still loading when the terminal opens therefore
+   * gets baked in as tofu — the glyphs never repair themselves, because nothing
+   * invalidates the atlas when a font arrives. That is exactly the bundled
+   * symbol font's situation: it is a 1MB data URL the browser only decodes once
+   * something asks for a codepoint in its unicode-range.
+   *
+   * So ask for one explicitly, then drop the atlas once the font is really
+   * there. Cheap, and it runs once per terminal.
+   */
+  private warmSymbolFont(): void {
+    const fonts = document.fonts as FontFaceSet | undefined;
+    if (fonts === undefined) return;
+    const size = this.terminal.options.fontSize ?? 13;
+    void fonts
+      .load(`${size}px ${SYMBOL_FAMILY}`, SYMBOL_SAMPLE)
+      .then(() => fonts.ready)
+      .then(() => {
+        if (this.disposed) return;
+        this.terminal.clearTextureAtlas();
+      })
+      .catch(() => {
+        // No symbol font is a cosmetic loss, not a broken terminal.
+      });
   }
 
   /**

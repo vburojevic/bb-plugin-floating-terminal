@@ -283,3 +283,20 @@
 .bb-ft-window[data-layout="sheet"][data-keyboard="open"] {
   --bb-ft-sheet-bottom: var(--bb-ft-sheet-gap);
 }
+
+/*
+ * Above bb's own chrome.
+ *
+ * The window shipped at z-40, and bb's floating sidebar toggle lives in a fixed
+ * z-50 layer — so on a phone, where the sheet starts 10px from the top-left
+ * corner, that button sat on top of the first tab. bb's own stack goes up to
+ * 70, which is where its dialogs and toasts live; 55 clears the chrome without
+ * climbing over anything that is supposed to interrupt you.
+ */
+.bb-ft-window {
+  z-index: 55;
+}
+
+.bb-ft-backdrop {
+  z-index: 54;
+}

@@ -2390,6 +2390,12 @@
 .bb-ft-window[data-layout=sheet][data-keyboard=open] {
   --bb-ft-sheet-bottom: var(--bb-ft-sheet-gap);
 }
+.bb-ft-window {
+  z-index: 55;
+}
+.bb-ft-backdrop {
+  z-index: 54;
+}
 /*! Bundled license information:
 
 @xterm/xterm/css/xterm.css:
