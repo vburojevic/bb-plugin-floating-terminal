@@ -95,6 +95,14 @@ tokens; the ANSI 16 come from `--ansi-0` … `--ansi-15`, the same tokens bb's
 terminal reads. Switch bb to Dracula or Gruvbox and this window's reds and
 yellows move with it, instead of sitting on a palette of their own.
 
+**Icons render everywhere.** A shell that prints file icons — `eza --icons`, a
+powerline prompt — needs a Nerd Font, and on a desktop that works only because
+the OS has one installed to fall back to. A phone has none and bb ships none, so
+every icon came out as a tofu box. The plugin now carries the Nerd Font symbol
+set itself (`fonts/`), listed last in the stack and restricted by
+`unicode-range`, so an installed Nerd Font still wins and this only draws the
+codepoints nothing else can.
+
 A tab is named for the directory it runs in, and takes the shell's title when
 the shell sets one worth having — `npm run dev` while that is running, back to
 `Acme Storefront` at the prompt. Titles that only restate the location
@@ -128,6 +136,7 @@ lib/scopes.ts                 which directories are offered, and in what order
 lib/frame.ts                  drag, resize, clamping, persistence
 lib/theme.ts                  bb's oklch tokens -> an xterm palette
 lib/rpc.ts                    fetch twin of the useRpc hook
+fonts/nerd-symbols.css        generated: the Nerd Font symbol set, inlined
 ```
 
 Three things are worth knowing before changing it:
@@ -183,4 +192,9 @@ consumers never need npm.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE).
+
+`fonts/nerd-symbols.css` carries Symbols Nerd Font Mono from
+[Nerd Fonts](https://github.com/ryanoasis/nerd-fonts) (MIT — see
+`fonts/LICENSE-nerd-fonts`), which aggregates icon sets under their own upstream
+licences. See `fonts/README.md` for provenance and how to rebuild it.

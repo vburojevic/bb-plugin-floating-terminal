@@ -6813,14 +6813,14 @@ function TabBar({
 }) {
   const activeTab = tabs.find((tab) => tab.terminalId === activeId) ?? null;
   return /* @__PURE__ */ jsxs("div", { className: "flex h-9 shrink-0 cursor-grab select-none items-center gap-1 border-b border-border bg-muted/40 pl-2 pr-1 active:cursor-grabbing", children: [
-    /* @__PURE__ */ jsx(
+    /* @__PURE__ */ jsx("span", { "data-bb-ft-grip": "", className: "flex shrink-0 items-center", children: /* @__PURE__ */ jsx(
       Icon,
       {
         name: "DragDropVertical",
         className: "size-3.5 shrink-0 text-muted-foreground/50",
         "aria-hidden": "true"
       }
-    ),
+    ) }),
     tabs.length === 0 ? null : /* @__PURE__ */ jsx(
       "div",
       {
@@ -20930,10 +20930,11 @@ function resolveTerminalTheme(scope) {
 }
 var NERD_FONTS = '"JetBrainsMono Nerd Font Mono", "MesloLGS NF", "Symbols Nerd Font Mono"';
 var GENERIC_MONO = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace';
+var BUNDLED_SYMBOLS = '"BB FT Nerd Symbols"';
 function resolveMonoFont(scope) {
   const declared = getComputedStyle(scope).getPropertyValue("--font-mono").trim();
   const host = declared === "" || declared.includes("var(") ? null : declared;
-  return [NERD_FONTS, host, GENERIC_MONO].filter((part) => part !== null).join(", ");
+  return [NERD_FONTS, host, GENERIC_MONO, BUNDLED_SYMBOLS].filter((part) => part !== null).join(", ");
 }
 
 // lib/pump.ts

@@ -187,11 +187,15 @@ export function TabBar({
 
   return (
     <div className="flex h-9 shrink-0 cursor-grab select-none items-center gap-1 border-b border-border bg-muted/40 pl-2 pr-1 active:cursor-grabbing">
-      <Icon
-        name="DragDropVertical"
-        className="size-3.5 shrink-0 text-muted-foreground/50"
-        aria-hidden="true"
-      />
+      {/* Hidden in sheet mode from styles.css: nothing there is draggable, and
+          a grip that does nothing is worse than no grip. */}
+      <span data-bb-ft-grip="" className="flex shrink-0 items-center">
+        <Icon
+          name="DragDropVertical"
+          className="size-3.5 shrink-0 text-muted-foreground/50"
+          aria-hidden="true"
+        />
+      </span>
 
       {tabs.length === 0 ? null : (
         <div

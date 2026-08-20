@@ -1,3 +1,5 @@
+@import "./fonts/nerd-symbols.css";
+
 /*
  * Everything Tailwind utilities cannot express for the floating window.
  * All rules are scoped under .bb-ft-window so nothing here can reach the rest
@@ -122,9 +124,14 @@
   transform: translate3d(0, 16px, 0) scale(0.985);
 }
 
-/* Nothing here is draggable, so the bar must not advertise that it is. */
+/* Nothing here is draggable, so the bar must not advertise that it is — no
+   grab cursor, and no drag grip taking room a tab could use. */
 .bb-ft-window[data-layout="sheet"] [data-bb-ft-handle] {
   cursor: default;
+}
+
+.bb-ft-window[data-layout="sheet"] [data-bb-ft-grip] {
+  display: none;
 }
 
 /*
