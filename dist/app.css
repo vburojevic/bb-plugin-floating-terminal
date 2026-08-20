@@ -357,8 +357,8 @@
     .max-h-\[300px\] {
       max-height: 300px;
     }
-    .max-h-full {
-      max-height: 100%;
+    .max-h-none {
+      max-height: none;
     }
     .min-h-0 {
       min-height: calc(var(--spacing) * 0);
@@ -2266,6 +2266,63 @@
 }
 .bb-ft-window [role=tablist]::-webkit-scrollbar {
   display: none;
+}
+.bb-ft-window[data-layout=sheet] {
+  --bb-ft-sheet-gap: 10px;
+  --bb-ft-sheet-top: calc(var(--bb-ft-sheet-gap) + env(safe-area-inset-top, 0px));
+  --bb-ft-sheet-bottom: calc( var(--bb-ft-sheet-gap) + env(safe-area-inset-bottom, 0px) );
+  left: calc(var(--bb-ft-sheet-gap) + env(safe-area-inset-left, 0px));
+  right: calc(var(--bb-ft-sheet-gap) + env(safe-area-inset-right, 0px));
+  top: var(--bb-ft-sheet-top);
+  bottom: auto;
+  width: auto;
+  height: calc(100vh - var(--bb-ft-sheet-top) - var(--bb-ft-sheet-bottom));
+  height: calc(100dvh - var(--bb-ft-sheet-top) - var(--bb-ft-sheet-bottom));
+  transform-origin: 50% 100%;
+}
+.bb-ft-window[data-layout=sheet][data-state=closed] {
+  transform: translate3d(0, 16px, 0) scale(0.985);
+}
+.bb-ft-window[data-layout=sheet] [data-bb-ft-handle] {
+  cursor: default;
+}
+.bb-ft-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 39;
+  background: color-mix(in oklab, var(--background) 45%, transparent);
+}
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .bb-ft-backdrop {
+    background: color-mix(in oklab, var(--background) 22%, transparent);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
+    backdrop-filter: blur(16px) saturate(140%);
+  }
+}
+.bb-ft-backdrop[data-state=closed] {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 130ms cubic-bezier(0.4, 0, 1, 1), visibility 0s linear 130ms;
+  visibility: hidden;
+}
+.bb-ft-backdrop[data-state=open] {
+  opacity: 1;
+  transition: opacity 190ms cubic-bezier(0.16, 1, 0.3, 1);
+  visibility: visible;
+}
+@media (prefers-reduced-motion: reduce) {
+  .bb-ft-backdrop[data-state=closed],
+  .bb-ft-backdrop[data-state=open] {
+    transition: none;
+  }
+}
+.bb-ft-window [data-bb-ft-fill] {
+  max-height: none;
+}
+@media (width < 48rem) {
+  .bb-ft-window [data-bb-ft-host] {
+    max-width: 6rem;
+  }
 }
 /*! Bundled license information:
 

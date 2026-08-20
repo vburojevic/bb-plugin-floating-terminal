@@ -19,6 +19,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { useIsCompactViewport } from "@/components/ui/hooks/use-compact-viewport";
 import { ShellPicker } from "@/components/shell-picker";
 import type { ScopeOption } from "@/lib/scopes";
 import { TabBar } from "@/components/tab-bar";
@@ -77,9 +78,14 @@ function EmptyState({
   onPick: (scopeKey: string) => void;
 }) {
   return (
-    <div className="flex size-full items-center justify-center overflow-hidden p-4">
+    // A column, not a row: `items-center` on a row container sizes the child
+    // from its content, so a long directory list grew past the window and got
+    // centre-clipped — the heading scrolled off the top edge and the list could
+    // not scroll. As a column with `min-h-0` the child shrinks to the available
+    // height instead, and the list inside it scrolls.
+    <div className="flex size-full min-h-0 flex-col items-center justify-center overflow-hidden p-4">
       {/* Centred while it fits, filling and scrolling once it does not. */}
-      <div className="flex max-h-full w-full min-w-0 max-w-md flex-col gap-3">
+      <div className="flex min-h-0 w-full min-w-0 max-w-md flex-col gap-3">
         <div className="flex shrink-0 flex-col gap-1 px-1">
           <h2 className="text-sm font-medium text-foreground">Start a shell</h2>
           <p className="text-xs leading-relaxed text-muted-foreground">
@@ -91,6 +97,7 @@ function EmptyState({
           recentScopeKeys={recentScopeKeys}
           showHosts={showHosts}
           onPick={onPick}
+          fill
           className="min-h-0 flex-1 rounded-lg border border-border bg-background/40"
         />
       </div>
@@ -106,6 +113,15 @@ export function FloatingTerminal() {
 
   const rpcRef = useRef(createRpcClient<typeof rpcContract>(PLUGIN_ID));
   const rpc = rpcRef.current;
+
+  /**
+   * Below bb's own compact-viewport breakpoint the window becomes a sheet: it
+   * fills the viewport minus one inset, styles.css owns the geometry, and drag
+   * and resize are never installed. Everything else about it is unchanged.
+   */
+  const sheet = useIsCompactViewport();
+  const sheetRef = useRef(sheet);
+  sheetRef.current = sheet;
 
   const [state, dispatch] = useReducer(tabsReducer, emptyTabs);
   const [scopes, setScopes] = useState<ScopeOption[]>([]);
@@ -145,6 +161,16 @@ export function FloatingTerminal() {
     frameRef.current = next;
     const node = rootRef.current;
     if (node === null) return;
+    if (sheetRef.current) {
+      // Hand geometry back to the stylesheet. Inline styles outrank a class,
+      // so leaving the last desktop frame here would pin the sheet to a
+      // 760x460 box in the corner.
+      node.style.removeProperty("left");
+      node.style.removeProperty("top");
+      node.style.removeProperty("width");
+      node.style.removeProperty("height");
+      return;
+    }
     node.style.left = `${next.x}px`;
     node.style.top = `${next.y}px`;
     node.style.width = `${next.width}px`;
@@ -293,7 +319,9 @@ export function FloatingTerminal() {
 
   useEffect(() => {
     const header = headerRef.current;
-    if (header === null) return;
+    // A sheet is pinned to the viewport, and a drag handle across its top would
+    // only compete with the scroll gesture underneath it.
+    if (header === null || sheet) return;
     const aborter = new AbortController();
     const options = {
       getFrame: () => frameRef.current,
@@ -308,13 +336,14 @@ export function FloatingTerminal() {
       }
     }
     return () => aborter.abort();
-  }, [applyFrame, commitFrame, mounted]);
+  }, [applyFrame, commitFrame, mounted, sheet]);
 
   // ---------------------------------------------------------- environment
 
   useEffect(() => {
     applyFrame(frameRef.current);
-  }, [applyFrame, mounted]);
+    setFitVersion((version) => version + 1);
+  }, [applyFrame, mounted, sheet]);
 
   useEffect(() => {
     if (!open) return;
@@ -422,6 +451,18 @@ export function FloatingTerminal() {
 
   return (
     <TooltipProvider delayDuration={400}>
+      {/* Only the sheet gets a scrim. The desktop window is deliberately
+          non-modal — bb stays usable behind it — but at this width the sheet
+          covers nearly everything, so a blurred backdrop is what makes it read
+          as one layer above the app rather than a panel welded to it. */}
+      {sheet ? (
+        <div
+          className="bb-ft-backdrop"
+          data-state={open && armed ? "open" : "closed"}
+          aria-hidden="true"
+          onPointerDown={hide}
+        />
+      ) : null}
       <div
         ref={rootRef}
         role="dialog"
@@ -431,9 +472,10 @@ export function FloatingTerminal() {
         aria-label="Floating terminal"
         aria-hidden={!open}
         data-state={open && armed ? "open" : "closed"}
+        data-layout={sheet ? "sheet" : "window"}
         className="bb-ft-window fixed z-40 flex flex-col overflow-hidden rounded-xl border border-border bg-card text-card-foreground shadow-2xl"
       >
-        <div ref={headerRef}>
+        <div ref={headerRef} data-bb-ft-handle="">
           <TabBar
             tabs={state.tabs}
             activeId={state.activeId}
@@ -478,17 +520,19 @@ export function FloatingTerminal() {
           ) : null}
         </div>
 
-        {RESIZE_EDGES.map((edge) => (
-          <div
-            key={edge}
-            ref={(node) => {
-              if (node === null) edgeRefs.current.delete(edge);
-              else edgeRefs.current.set(edge, node);
-            }}
-            className={EDGE_CLASS[edge] ?? ""}
-            aria-hidden="true"
-          />
-        ))}
+        {sheet
+          ? null
+          : RESIZE_EDGES.map((edge) => (
+              <div
+                key={edge}
+                ref={(node) => {
+                  if (node === null) edgeRefs.current.delete(edge);
+                  else edgeRefs.current.set(edge, node);
+                }}
+                className={EDGE_CLASS[edge] ?? ""}
+                aria-hidden="true"
+              />
+            ))}
       </div>
     </TooltipProvider>
   );

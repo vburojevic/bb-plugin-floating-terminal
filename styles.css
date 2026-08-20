@@ -82,3 +82,119 @@
 .bb-ft-window [role="tablist"]::-webkit-scrollbar {
   display: none;
 }
+
+/*
+ * Mobile: one sheet, inset on every side.
+ *
+ * A 760x460 window dragged around a phone screen is a desktop idea wearing the
+ * wrong clothes — at this width it either covers everything anyway or is too
+ * small to read, and the drag handle competes with the scroll gesture. So on a
+ * compact viewport the window stops being a window: it fills the viewport minus
+ * one even inset, the geometry moves from inline styles to here, and drag and
+ * resize are not installed at all.
+ *
+ * The inset is measured from the safe area, not the edge, so the sheet clears a
+ * notch and a home indicator instead of tucking under them. Height comes from
+ * dvh rather than a bottom offset because a fixed element resolves its
+ * containing block against the *large* viewport on iOS — with `bottom` the
+ * sheet would sit behind the URL bar exactly when the bar is showing.
+ */
+.bb-ft-window[data-layout="sheet"] {
+  --bb-ft-sheet-gap: 10px;
+  --bb-ft-sheet-top: calc(var(--bb-ft-sheet-gap) + env(safe-area-inset-top, 0px));
+  --bb-ft-sheet-bottom: calc(
+    var(--bb-ft-sheet-gap) + env(safe-area-inset-bottom, 0px)
+  );
+
+  left: calc(var(--bb-ft-sheet-gap) + env(safe-area-inset-left, 0px));
+  right: calc(var(--bb-ft-sheet-gap) + env(safe-area-inset-right, 0px));
+  top: var(--bb-ft-sheet-top);
+  bottom: auto;
+  width: auto;
+  height: calc(100vh - var(--bb-ft-sheet-top) - var(--bb-ft-sheet-bottom));
+  height: calc(100dvh - var(--bb-ft-sheet-top) - var(--bb-ft-sheet-bottom));
+  /* Rises from the bottom edge rather than growing out of a corner button
+     that is not on screen at this width. */
+  transform-origin: 50% 100%;
+}
+
+.bb-ft-window[data-layout="sheet"][data-state="closed"] {
+  transform: translate3d(0, 16px, 0) scale(0.985);
+}
+
+/* Nothing here is draggable, so the bar must not advertise that it is. */
+.bb-ft-window[data-layout="sheet"] [data-bb-ft-handle] {
+  cursor: default;
+}
+
+/*
+ * The scrim behind the sheet. Blurred rather than merely dimmed so the bb
+ * window reads as *behind* something solid instead of just darkened — at this
+ * size the sheet covers almost everything, and a flat dim leaves the edges
+ * looking like a rendering bug.
+ */
+.bb-ft-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 39;
+  background: color-mix(in oklab, var(--background) 45%, transparent);
+}
+
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .bb-ft-backdrop {
+    background: color-mix(in oklab, var(--background) 22%, transparent);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
+    backdrop-filter: blur(16px) saturate(140%);
+  }
+}
+
+.bb-ft-backdrop[data-state="closed"] {
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 130ms cubic-bezier(0.4, 0, 1, 1),
+    visibility 0s linear 130ms;
+  visibility: hidden;
+}
+
+.bb-ft-backdrop[data-state="open"] {
+  opacity: 1;
+  transition: opacity 190ms cubic-bezier(0.16, 1, 0.3, 1);
+  visibility: visible;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bb-ft-backdrop[data-state="closed"],
+  .bb-ft-backdrop[data-state="open"] {
+    transition: none;
+  }
+}
+
+/*
+ * Two sizing rules that have to live here rather than as utility classes.
+ *
+ * This plugin ships its own Tailwind build, and inside the host page its
+ * utility layer loses to bb's app CSS for `max-*` and the text sizes: on a
+ * measured page `min-h-0` and the vendored `max-h-[300px]` both land, while
+ * `max-h-none`, `max-h-full` and `max-w-24` all compute to `none`. Everything
+ * scoped under .bb-ft-window does apply, so the two caps that matter are set
+ * here where they are guaranteed to win.
+ */
+
+/* The empty window gives the picker a whole pane; the vendored menu cap would
+   strand it at 300px in the middle of it. */
+.bb-ft-window [data-bb-ft-fill] {
+  max-height: none;
+}
+
+/*
+ * At sheet width the machine name is the least important thing in the row, but
+ * "Vedrans-MacBook-Pro" is 151px of a 313px row — enough to truncate every
+ * project to "bb-plugin-co…". Cap it below the same breakpoint the sheet uses;
+ * wider rows have the room and keep the full name.
+ */
+@media (width < 48rem) {
+  .bb-ft-window [data-bb-ft-host] {
+    max-width: 6rem;
+  }
+}

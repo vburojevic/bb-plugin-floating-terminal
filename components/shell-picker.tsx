@@ -22,6 +22,11 @@ export interface ShellPickerProps {
   /** True when more than one machine is connected, so paths need qualifying. */
   showHosts: boolean;
   onPick: (scopeKey: string) => void;
+  /**
+   * Take the height offered instead of the menu-sized default. The empty window
+   * has a whole pane to fill; the `+` dropdown must stay a dropdown.
+   */
+  fill?: boolean;
   className?: string;
 }
 
@@ -33,6 +38,7 @@ export function ShellPicker({
   recentScopeKeys,
   showHosts,
   onPick,
+  fill = false,
   className,
 }: ShellPickerProps) {
   const sections = buildSections(scopes, recentScopeKeys);
@@ -45,7 +51,12 @@ export function ShellPicker({
       className={cn("flex min-h-0 flex-col bg-transparent", className)}
     >
       {searchable ? <CommandInput placeholder="Find a directory" /> : null}
-      <CommandList className="max-h-full min-h-0 flex-1">
+      {/* Fill mode is bounded by the flex parent, so it has to shed the
+          vendored 300px menu cap; the dropdown keeps it. The cap is lifted from
+          styles.css rather than with `max-h-none`, because this plugin's
+          Tailwind utility layer loses to bb's own app CSS in the host page —
+          `min-h-0` lands, `max-h-*` does not. */}
+      <CommandList data-bb-ft-fill={fill ? "" : undefined} className={cn(fill && "min-h-0 flex-1")}>
         <CommandEmpty className="py-6 text-center text-sm text-muted-foreground">
           No directory matches that.
         </CommandEmpty>
@@ -74,7 +85,15 @@ export function ShellPicker({
                     put the same 19 characters in front of every row and made
                     the list unscannable. */}
                 {showHosts || !scope.online ? (
-                  <span className="shrink-0 self-center text-xs text-muted-foreground">
+                  // The width cap lives in styles.css for the same reason as
+                  // the list cap above. At sheet width a long machine name took
+                  // half the row and truncated every project to
+                  // "bb-plugin-co…"; the row never overflows, so the label just
+                  // got whatever was left and flex shrinking never kicked in.
+                  <span
+                    data-bb-ft-host=""
+                    className="shrink-0 self-center truncate text-xs text-muted-foreground"
+                  >
                     {showHosts ? scope.hostName : null}
                     {!scope.online ? (showHosts ? " · offline" : "offline") : null}
                   </span>

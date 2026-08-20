@@ -3498,6 +3498,65 @@ var TooltipContent2 = forwardRef(function TooltipContentComponent({
 });
 TooltipContent2.displayName = Content.displayName;
 
+// components/ui/hooks/use-media-query.ts
+var mediaQueryCache = /* @__PURE__ */ new Map();
+function createMediaQueryRef(query) {
+  if (typeof window === "undefined") return null;
+  let ref = mediaQueryCache.get(query);
+  if (ref) return ref;
+  const mql = window.matchMedia(query);
+  const listeners2 = /* @__PURE__ */ new Set();
+  const onChange = () => {
+    for (const listener of listeners2) listener();
+  };
+  ref = {
+    mql,
+    subscribe(notify) {
+      const wasEmpty = listeners2.size === 0;
+      listeners2.add(notify);
+      if (wasEmpty) {
+        mql.addEventListener("change", onChange);
+      }
+      return () => {
+        listeners2.delete(notify);
+        if (listeners2.size === 0) {
+          mql.removeEventListener("change", onChange);
+          mediaQueryCache.delete(query);
+        }
+      };
+    }
+  };
+  mediaQueryCache.set(query, ref);
+  return ref;
+}
+function subscribeMediaQuery(query, notify) {
+  return createMediaQueryRef(query)?.subscribe(notify) ?? (() => {
+  });
+}
+function getMediaQuerySnapshot(query) {
+  if (typeof window === "undefined") return false;
+  return mediaQueryCache.get(query)?.mql.matches ?? window.matchMedia(query).matches;
+}
+function useMediaQuery(query) {
+  return useSyncExternalStore(
+    (notify) => subscribeMediaQuery(query, notify),
+    () => getMediaQuerySnapshot(query),
+    () => false
+  );
+}
+
+// components/ui/hooks/use-compact-viewport.tsx
+var COMPACT_VIEWPORT_QUERY = "(max-width: 767px)";
+var CompactViewportOverrideContext = createContext(null);
+function useIsCompactViewport() {
+  const override = useContext(CompactViewportOverrideContext);
+  const isCompactViewport = useMediaQuery(COMPACT_VIEWPORT_QUERY);
+  if (override !== null) {
+    return override;
+  }
+  return isCompactViewport;
+}
+
 // node_modules/cmdk/dist/chunk-NZJY6EH4.mjs
 var U = 1;
 var Y = 0.9;
@@ -5260,65 +5319,6 @@ var DrawerDescription = forwardRef(({ className, ...props }, ref) => /* @__PURE_
 ));
 DrawerDescription.displayName = Drawer.Description.displayName;
 
-// components/ui/hooks/use-media-query.ts
-var mediaQueryCache = /* @__PURE__ */ new Map();
-function createMediaQueryRef(query) {
-  if (typeof window === "undefined") return null;
-  let ref = mediaQueryCache.get(query);
-  if (ref) return ref;
-  const mql = window.matchMedia(query);
-  const listeners2 = /* @__PURE__ */ new Set();
-  const onChange = () => {
-    for (const listener of listeners2) listener();
-  };
-  ref = {
-    mql,
-    subscribe(notify) {
-      const wasEmpty = listeners2.size === 0;
-      listeners2.add(notify);
-      if (wasEmpty) {
-        mql.addEventListener("change", onChange);
-      }
-      return () => {
-        listeners2.delete(notify);
-        if (listeners2.size === 0) {
-          mql.removeEventListener("change", onChange);
-          mediaQueryCache.delete(query);
-        }
-      };
-    }
-  };
-  mediaQueryCache.set(query, ref);
-  return ref;
-}
-function subscribeMediaQuery(query, notify) {
-  return createMediaQueryRef(query)?.subscribe(notify) ?? (() => {
-  });
-}
-function getMediaQuerySnapshot(query) {
-  if (typeof window === "undefined") return false;
-  return mediaQueryCache.get(query)?.mql.matches ?? window.matchMedia(query).matches;
-}
-function useMediaQuery(query) {
-  return useSyncExternalStore(
-    (notify) => subscribeMediaQuery(query, notify),
-    () => getMediaQuerySnapshot(query),
-    () => false
-  );
-}
-
-// components/ui/hooks/use-compact-viewport.tsx
-var COMPACT_VIEWPORT_QUERY = "(max-width: 767px)";
-var CompactViewportOverrideContext = createContext(null);
-function useIsCompactViewport() {
-  const override = useContext(CompactViewportOverrideContext);
-  const isCompactViewport = useMediaQuery(COMPACT_VIEWPORT_QUERY);
-  if (override !== null) {
-    return override;
-  }
-  return isCompactViewport;
-}
-
 // components/ui/hooks/use-pointer-coarse.ts
 var POINTER_COARSE_QUERY = "(pointer: coarse)";
 function usePointerCoarse() {
@@ -5852,6 +5852,7 @@ function ShellPicker({
   recentScopeKeys,
   showHosts,
   onPick,
+  fill = false,
   className
 }) {
   const sections = buildSections(scopes, recentScopeKeys);
@@ -5862,7 +5863,7 @@ function ShellPicker({
       className: cn("flex min-h-0 flex-col bg-transparent", className),
       children: [
         searchable ? /* @__PURE__ */ jsx(CommandInput, { placeholder: "Find a directory" }) : null,
-        /* @__PURE__ */ jsxs(CommandList, { className: "max-h-full min-h-0 flex-1", children: [
+        /* @__PURE__ */ jsxs(CommandList, { "data-bb-ft-fill": fill ? "" : void 0, className: cn(fill && "min-h-0 flex-1"), children: [
           /* @__PURE__ */ jsx(CommandEmpty, { className: "py-6 text-center text-sm text-muted-foreground", children: "No directory matches that." }),
           sections.map((section) => /* @__PURE__ */ jsx(CommandGroup, { heading: section.heading, children: section.scopes.map((scope) => /* @__PURE__ */ jsxs(
             CommandItem,
@@ -5884,10 +5885,24 @@ function ShellPicker({
                   /* @__PURE__ */ jsx("span", { className: "truncate", children: scope.label }),
                   /* @__PURE__ */ jsx("span", { className: "truncate font-mono text-xs text-muted-foreground", children: shortenPath(scope.detail) })
                 ] }),
-                showHosts || !scope.online ? /* @__PURE__ */ jsxs("span", { className: "shrink-0 self-center text-xs text-muted-foreground", children: [
-                  showHosts ? scope.hostName : null,
-                  !scope.online ? showHosts ? " \xB7 offline" : "offline" : null
-                ] }) : null
+                showHosts || !scope.online ? (
+                  // The width cap lives in styles.css for the same reason as
+                  // the list cap above. At sheet width a long machine name took
+                  // half the row and truncated every project to
+                  // "bb-plugin-co…"; the row never overflows, so the label just
+                  // got whatever was left and flex shrinking never kicked in.
+                  /* @__PURE__ */ jsxs(
+                    "span",
+                    {
+                      "data-bb-ft-host": "",
+                      className: "shrink-0 self-center truncate text-xs text-muted-foreground",
+                      children: [
+                        showHosts ? scope.hostName : null,
+                        !scope.online ? showHosts ? " \xB7 offline" : "offline" : null
+                      ]
+                    }
+                  )
+                ) : null
               ]
             },
             scope.key
@@ -21487,22 +21502,30 @@ function EmptyState({
   showHosts,
   onPick
 }) {
-  return /* @__PURE__ */ jsx("div", { className: "flex size-full items-center justify-center overflow-hidden p-4", children: /* @__PURE__ */ jsxs("div", { className: "flex max-h-full w-full min-w-0 max-w-md flex-col gap-3", children: [
-    /* @__PURE__ */ jsxs("div", { className: "flex shrink-0 flex-col gap-1 px-1", children: [
-      /* @__PURE__ */ jsx("h2", { className: "text-sm font-medium text-foreground", children: "Start a shell" }),
-      /* @__PURE__ */ jsx("p", { className: "text-xs leading-relaxed text-muted-foreground", children: "Pick where it runs. Shells keep going while this window is hidden." })
-    ] }),
-    /* @__PURE__ */ jsx(
-      ShellPicker,
-      {
-        scopes,
-        recentScopeKeys,
-        showHosts,
-        onPick,
-        className: "min-h-0 flex-1 rounded-lg border border-border bg-background/40"
-      }
-    )
-  ] }) });
+  return (
+    // A column, not a row: `items-center` on a row container sizes the child
+    // from its content, so a long directory list grew past the window and got
+    // centre-clipped — the heading scrolled off the top edge and the list could
+    // not scroll. As a column with `min-h-0` the child shrinks to the available
+    // height instead, and the list inside it scrolls.
+    /* @__PURE__ */ jsx("div", { className: "flex size-full min-h-0 flex-col items-center justify-center overflow-hidden p-4", children: /* @__PURE__ */ jsxs("div", { className: "flex min-h-0 w-full min-w-0 max-w-md flex-col gap-3", children: [
+      /* @__PURE__ */ jsxs("div", { className: "flex shrink-0 flex-col gap-1 px-1", children: [
+        /* @__PURE__ */ jsx("h2", { className: "text-sm font-medium text-foreground", children: "Start a shell" }),
+        /* @__PURE__ */ jsx("p", { className: "text-xs leading-relaxed text-muted-foreground", children: "Pick where it runs. Shells keep going while this window is hidden." })
+      ] }),
+      /* @__PURE__ */ jsx(
+        ShellPicker,
+        {
+          scopes,
+          recentScopeKeys,
+          showHosts,
+          onPick,
+          fill: true,
+          className: "min-h-0 flex-1 rounded-lg border border-border bg-background/40"
+        }
+      )
+    ] }) })
+  );
 }
 function FloatingTerminal() {
   const open2 = useSyncExternalStore(
@@ -21511,6 +21534,9 @@ function FloatingTerminal() {
   );
   const rpcRef = useRef(createRpcClient(PLUGIN_ID));
   const rpc = rpcRef.current;
+  const sheet = useIsCompactViewport();
+  const sheetRef = useRef(sheet);
+  sheetRef.current = sheet;
   const [state, dispatch] = useReducer(tabsReducer, emptyTabs);
   const [scopes, setScopes] = useState([]);
   const [recentScopeKeys, setRecentScopeKeys] = useState([]);
@@ -21530,6 +21556,13 @@ function FloatingTerminal() {
     frameRef.current = next;
     const node = rootRef.current;
     if (node === null) return;
+    if (sheetRef.current) {
+      node.style.removeProperty("left");
+      node.style.removeProperty("top");
+      node.style.removeProperty("width");
+      node.style.removeProperty("height");
+      return;
+    }
     node.style.left = `${next.x}px`;
     node.style.top = `${next.y}px`;
     node.style.width = `${next.width}px`;
@@ -21641,7 +21674,7 @@ function FloatingTerminal() {
   }, [open2, sync]);
   useEffect(() => {
     const header = headerRef.current;
-    if (header === null) return;
+    if (header === null || sheet) return;
     const aborter = new AbortController();
     const options = {
       getFrame: () => frameRef.current,
@@ -21656,10 +21689,11 @@ function FloatingTerminal() {
       }
     }
     return () => aborter.abort();
-  }, [applyFrame, commitFrame, mounted]);
+  }, [applyFrame, commitFrame, mounted, sheet]);
   useEffect(() => {
     applyFrame(frameRef.current);
-  }, [applyFrame, mounted]);
+    setFitVersion((version4) => version4 + 1);
+  }, [applyFrame, mounted, sheet]);
   useEffect(() => {
     if (!open2) return;
     applyFrame(clampFrame(frameRef.current));
@@ -21739,78 +21773,90 @@ function FloatingTerminal() {
   const hide = useCallback(() => windowController.hide(), []);
   const showHosts = new Set(scopes.map((scope) => scope.hostName)).size > 1;
   if (!mounted) return null;
-  return /* @__PURE__ */ jsx(TooltipProvider2, { delayDuration: 400, children: /* @__PURE__ */ jsxs(
-    "div",
-    {
-      ref: rootRef,
-      role: "dialog",
-      "aria-modal": "false",
-      "aria-label": "Floating terminal",
-      "aria-hidden": !open2,
-      "data-state": open2 && armed ? "open" : "closed",
-      className: "bb-ft-window fixed z-40 flex flex-col overflow-hidden rounded-xl border border-border bg-card text-card-foreground shadow-2xl",
-      children: [
-        /* @__PURE__ */ jsx("div", { ref: headerRef, children: /* @__PURE__ */ jsx(
-          TabBar,
-          {
-            tabs: state.tabs,
-            activeId: state.activeId,
-            scopes,
-            recentScopeKeys,
-            showHosts,
-            onSelect: selectTab,
-            onClose: (terminalId) => void closeTab(terminalId),
-            onNewTab: (scopeKey) => void openTab(scopeKey),
-            onRestart: () => {
-              if (state.activeId !== null) void restartTab(state.activeId);
-            },
-            onHide: hide
-          }
-        ) }),
-        /* @__PURE__ */ jsxs("div", { className: "relative min-h-0 flex-1 bg-card px-2 py-1.5", children: [
-          state.tabs.map((tab) => /* @__PURE__ */ jsx(
-            TerminalView,
+  return /* @__PURE__ */ jsxs(TooltipProvider2, { delayDuration: 400, children: [
+    sheet ? /* @__PURE__ */ jsx(
+      "div",
+      {
+        className: "bb-ft-backdrop",
+        "data-state": open2 && armed ? "open" : "closed",
+        "aria-hidden": "true",
+        onPointerDown: hide
+      }
+    ) : null,
+    /* @__PURE__ */ jsxs(
+      "div",
+      {
+        ref: rootRef,
+        role: "dialog",
+        "aria-modal": "false",
+        "aria-label": "Floating terminal",
+        "aria-hidden": !open2,
+        "data-state": open2 && armed ? "open" : "closed",
+        "data-layout": sheet ? "sheet" : "window",
+        className: "bb-ft-window fixed z-40 flex flex-col overflow-hidden rounded-xl border border-border bg-card text-card-foreground shadow-2xl",
+        children: [
+          /* @__PURE__ */ jsx("div", { ref: headerRef, "data-bb-ft-handle": "", children: /* @__PURE__ */ jsx(
+            TabBar,
             {
-              rpc,
-              terminalId: tab.terminalId,
-              visible: open2 && tab.terminalId === state.activeId,
-              fontSize,
-              themeVersion,
-              fitVersion,
-              onStatus,
-              onTitle,
-              onRequestRestart,
-              onToggleRequested: hide,
-              onPumpReady,
-              onPumpGone
-            },
-            tab.terminalId
-          )),
-          state.tabs.length === 0 ? /* @__PURE__ */ jsx(
-            EmptyState,
-            {
+              tabs: state.tabs,
+              activeId: state.activeId,
               scopes,
               recentScopeKeys,
               showHosts,
-              onPick: (scopeKey) => void openTab(scopeKey)
+              onSelect: selectTab,
+              onClose: (terminalId) => void closeTab(terminalId),
+              onNewTab: (scopeKey) => void openTab(scopeKey),
+              onRestart: () => {
+                if (state.activeId !== null) void restartTab(state.activeId);
+              },
+              onHide: hide
             }
-          ) : null
-        ] }),
-        RESIZE_EDGES.map((edge) => /* @__PURE__ */ jsx(
-          "div",
-          {
-            ref: (node) => {
-              if (node === null) edgeRefs.current.delete(edge);
-              else edgeRefs.current.set(edge, node);
+          ) }),
+          /* @__PURE__ */ jsxs("div", { className: "relative min-h-0 flex-1 bg-card px-2 py-1.5", children: [
+            state.tabs.map((tab) => /* @__PURE__ */ jsx(
+              TerminalView,
+              {
+                rpc,
+                terminalId: tab.terminalId,
+                visible: open2 && tab.terminalId === state.activeId,
+                fontSize,
+                themeVersion,
+                fitVersion,
+                onStatus,
+                onTitle,
+                onRequestRestart,
+                onToggleRequested: hide,
+                onPumpReady,
+                onPumpGone
+              },
+              tab.terminalId
+            )),
+            state.tabs.length === 0 ? /* @__PURE__ */ jsx(
+              EmptyState,
+              {
+                scopes,
+                recentScopeKeys,
+                showHosts,
+                onPick: (scopeKey) => void openTab(scopeKey)
+              }
+            ) : null
+          ] }),
+          sheet ? null : RESIZE_EDGES.map((edge) => /* @__PURE__ */ jsx(
+            "div",
+            {
+              ref: (node) => {
+                if (node === null) edgeRefs.current.delete(edge);
+                else edgeRefs.current.set(edge, node);
+              },
+              className: EDGE_CLASS[edge] ?? "",
+              "aria-hidden": "true"
             },
-            className: EDGE_CLASS[edge] ?? "",
-            "aria-hidden": "true"
-          },
-          edge
-        ))
-      ]
-    }
-  ) });
+            edge
+          ))
+        ]
+      }
+    )
+  ] });
 }
 
 // app.tsx

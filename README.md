@@ -55,6 +55,16 @@ being scannable, the list grows a search field.
 
 *The `+` menu renders the same picker, so the vocabulary never shifts.*
 
+### On a phone it stops being a window
+
+Below bb's compact-viewport breakpoint the window becomes a sheet: it fills the
+viewport minus one even inset — measured from the safe area, so it clears a
+notch and a home indicator — over a blurred backdrop, and drag and resize are
+not installed at all. A 760x460 window you drag around a phone screen is a
+desktop idea in the wrong clothes; at that width it either covers everything
+anyway or is too small to read, and the drag handle only fights the scroll
+gesture. Tapping the backdrop hides it, the same as the close button.
+
 ### It looks like the rest of your bb
 
 ![The same window in bb's light theme](docs/media/light.png)
