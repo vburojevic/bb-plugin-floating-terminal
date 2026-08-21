@@ -186,6 +186,27 @@ bb plugin build
 bb plugin dev      # watch: rebuild + reload on every save
 ```
 
+`npm test` is hermetic. The mobile behaviour is not testable that way — a sheet
+that tracks `visualViewport`, a key bar, and touch scrolling only mean anything
+against a real browser and a real pty — so that lives in a separate pass:
+
+```sh
+npm run test:mobile                            # the whole matrix
+node tests/mobile-e2e.mjs webkit "iPhone 14 Pro"
+```
+
+It drives a running bb (`BB_APP_URL`, default `http://localhost:38886`) across
+Galaxy S9+, iPhone 14 Pro, Pixel 7, the same iPhone under WebKit — the engine
+iOS Safari uses — and an iPad, which is over the compact breakpoint and must
+stay a window. 34 checks: layout and insets, stacking above bb's chrome, the
+directory list, the key bar and its latch, touch scrolling in both buffers,
+momentum, the bundled glyphs, keyboard-aware height, and persistence across a
+hide and reopen.
+
+It opens and closes real shells in whichever bb it points at, and asserts it
+leaves none behind. Touch gestures go over CDP, so on WebKit those checks report
+SKIP rather than passing silently.
+
 `components/ui/` is vendored source you own (the shadcn model) — edit it
 freely, it never updates out from under you. Add more from bb's registry, which
 is pinned in `components.json` to the bb release you are running:
