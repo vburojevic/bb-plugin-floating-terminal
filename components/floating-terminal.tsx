@@ -18,10 +18,12 @@ import {
   useSyncExternalStore,
 } from "react";
 import { toast } from "sonner";
+import { Icon } from "@/components/ui/icon";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useIsCompactViewport } from "@/components/ui/hooks/use-compact-viewport";
 import { ShellPicker } from "@/components/shell-picker";
 import type { ScopeOption } from "@/lib/scopes";
+import { FindBar } from "@/components/find-bar";
 import { KeyToolbar } from "@/components/key-toolbar";
 import { TabBar } from "@/components/tab-bar";
 import { TerminalView } from "@/components/terminal-view";
@@ -59,6 +61,9 @@ const EDGE_CLASS: Record<string, string> = {
 
 /** Long enough that a per-prompt title setter costs one rename, not dozens. */
 const TITLE_RENAME_DEBOUNCE_MS = 500;
+
+/** Maximized keeps a sliver of app visible, so it still reads as a window. */
+const MAX_GUTTER = 16;
 
 /** Geometry for openTab before any pump exists; the first fit corrects it. */
 const DEFAULT_COLS = 80;
@@ -141,6 +146,12 @@ export function FloatingTerminal() {
    * entirely, and costs nothing for a session where it is never used.
    */
   const [ctrlArmed, setCtrlArmed] = useState(false);
+  /** Window mode only. Never persisted: a maximized session is a mood, not a layout. */
+  const [maximized, setMaximized] = useState(false);
+  /** Whether the active tab sits at the newest output; drives the pill. */
+  const [atBottom, setAtBottom] = useState(true);
+  const [findOpen, setFindOpen] = useState(false);
+  const [findResults, setFindResults] = useState<{ index: number; count: number } | null>(null);
   const [mounted, setMounted] = useState(false);
   /** One frame behind `mounted`, so the first open still animates in. */
   const [armed, setArmed] = useState(false);
@@ -155,6 +166,8 @@ export function FloatingTerminal() {
    * PTY that no tab strip will ever show.
    */
   const restarting = useRef(new Set<string>());
+  const maximizedRef = useRef(false);
+  maximizedRef.current = maximized;
 
   // Geometry lives in a ref (the drag handlers read and write it every pointer
   // move) and is mirrored onto the element directly — re-rendering React 60
@@ -182,10 +195,20 @@ export function FloatingTerminal() {
     }
     frameRef.current = next;
     if (node === null) return;
-    node.style.left = `${next.x}px`;
-    node.style.top = `${next.y}px`;
-    node.style.width = `${next.width}px`;
-    node.style.height = `${next.height}px`;
+    // Maximized paints its own geometry but must not overwrite the remembered
+    // frame — restore has to put the window back exactly where it was.
+    const rect = maximizedRef.current
+      ? {
+          x: MAX_GUTTER,
+          y: MAX_GUTTER,
+          width: window.innerWidth - 2 * MAX_GUTTER,
+          height: window.innerHeight - 2 * MAX_GUTTER,
+        }
+      : next;
+    node.style.left = `${rect.x}px`;
+    node.style.top = `${rect.y}px`;
+    node.style.width = `${rect.width}px`;
+    node.style.height = `${rect.height}px`;
   }, []);
 
   const commitFrame = useCallback(
@@ -296,6 +319,10 @@ export function FloatingTerminal() {
   );
 
   useEffect(() => {
+    if (sheet) setMaximized(false);
+  }, [sheet]);
+
+  useEffect(() => {
     setCtrlArmed(false);
   }, [state.activeId]);
 
@@ -335,8 +362,9 @@ export function FloatingTerminal() {
   useEffect(() => {
     const header = headerRef.current;
     // A sheet is pinned to the viewport, and a drag handle across its top would
-    // only compete with the scroll gesture underneath it.
-    if (header === null || sheet) return;
+    // only compete with the scroll gesture underneath it. A maximized window
+    // has nowhere to be dragged to.
+    if (header === null || sheet || maximized) return;
     const aborter = new AbortController();
     const options = {
       getFrame: () => frameRef.current,
@@ -351,7 +379,7 @@ export function FloatingTerminal() {
       }
     }
     return () => aborter.abort();
-  }, [applyFrame, commitFrame, mounted, sheet]);
+  }, [applyFrame, commitFrame, mounted, sheet, maximized]);
 
   // ---------------------------------------------------------- environment
 
@@ -363,7 +391,7 @@ export function FloatingTerminal() {
     // in which case loadFrame derives the default for the viewport we are in now.
     applyFrame(sheet ? frameRef.current : loadFrame());
     setFitVersion((version) => version + 1);
-  }, [applyFrame, mounted, sheet]);
+  }, [applyFrame, mounted, sheet, maximized]);
 
   useEffect(() => {
     if (!open) return;
@@ -482,6 +510,81 @@ export function FloatingTerminal() {
     return pumps.current.get(activeId) ?? null;
   }, []);
 
+
+  // ----------------------------------------------------------- find in tab
+  const [findQuery, setFindQuery] = useState("");
+  const findQueryRef = useRef("");
+  findQueryRef.current = findQuery;
+
+  const openFind = useCallback(() => {
+    if (activePump()?.searchAvailable() !== true) return;
+    setFindOpen(true);
+  }, [activePump]);
+
+  const closeFind = useCallback(() => {
+    setFindOpen(false);
+    setFindResults(null);
+    const pump = activePump();
+    pump?.clearSearch();
+    pump?.focus();
+  }, [activePump]);
+
+  const onFindQueryChange = useCallback(
+    (query: string) => {
+      setFindQuery(query);
+      const pump = activePump();
+      if (pump === null) return;
+      if (query === "") {
+        pump.clearSearch();
+        setFindResults(null);
+        return;
+      }
+      pump.findNext(query, true);
+    },
+    [activePump],
+  );
+
+  const onFindNext = useCallback(() => {
+    activePump()?.findNext(findQueryRef.current);
+  }, [activePump]);
+
+  const onFindPrevious = useCallback(() => {
+    activePump()?.findPrevious(findQueryRef.current);
+  }, [activePump]);
+
+  const onSearchResults = useCallback(
+    (_terminalId: string, results: { index: number; count: number } | null) => {
+      setFindResults(results);
+    },
+    [],
+  );
+
+  // A search belongs to the buffer it ran in; switching tabs closes it rather
+  // than replaying a stale query over a different shell.
+  const lastActiveRef = useRef<string | null>(null);
+  useEffect(() => {
+    const previous = lastActiveRef.current;
+    lastActiveRef.current = state.activeId;
+    if (previous !== null && previous !== state.activeId) {
+      pumps.current.get(previous)?.clearSearch();
+      setFindOpen(false);
+      setFindResults(null);
+    }
+  }, [state.activeId]);
+
+  const onScrollState = useCallback(
+    (terminalId: string, tabAtBottom: boolean) => {
+      if (terminalId === activeIdRef.current) setAtBottom(tabAtBottom);
+    },
+    [],
+  );
+
+  // Switching tabs: the pill state belongs to the new tab, and until its pump
+  // reports otherwise the safe assumption is "at the prompt".
+  useEffect(() => {
+    setAtBottom(true);
+  }, [state.activeId]);
+
   const onToolbarKey = useCallback(
     (key: ToolbarKey) => {
       const pump = activePump();
@@ -503,6 +606,10 @@ export function FloatingTerminal() {
             pump.blur();
             return;
           }
+          if (key.id === "find") {
+            openFind();
+            return;
+          }
           if (key.id === "paste") {
             void navigator.clipboard
               ?.readText()
@@ -516,10 +623,11 @@ export function FloatingTerminal() {
           return;
       }
     },
-    [activePump, ctrlArmed],
+    [activePump, ctrlArmed, openFind],
   );
 
   const onCtrlArmed = useCallback((armed: boolean) => setCtrlArmed(armed), []);
+
 
   // A bare ~ means nothing once there is more than one machine.
   const showHosts = new Set(scopes.map((scope) => scope.hostName)).size > 1;
@@ -550,15 +658,37 @@ export function FloatingTerminal() {
         aria-hidden={!open}
         data-state={open && armed ? "open" : "closed"}
         data-layout={sheet ? "sheet" : "window"}
-        className="bb-ft-window fixed z-40 flex flex-col overflow-hidden rounded-xl border border-border bg-card text-card-foreground shadow-2xl"
+        // Stacking lives in styles.css, where the backdrop and window are kept in
+        // one place relative to bb's own layers.
+        className="bb-ft-window fixed flex flex-col overflow-hidden rounded-xl border border-border bg-card text-card-foreground shadow-2xl"
       >
-        <div ref={headerRef} data-bb-ft-handle="">
+        <div
+          ref={headerRef}
+          data-bb-ft-handle=""
+          // The title-bar convention from every desktop OS. Interactive
+          // children (tabs, buttons, the picker) stop the double-click the
+          // same way they stop the drag.
+          onDoubleClick={(event) => {
+            if (sheet) return;
+            const target = event.target as HTMLElement | null;
+            if (target?.closest("[data-no-drag]") != null) return;
+            setMaximized((value) => !value);
+          }}
+        >
           <TabBar
             tabs={state.tabs}
             activeId={state.activeId}
             scopes={scopes}
             recentScopeKeys={recentScopeKeys}
             showHosts={showHosts}
+            maximize={
+              sheet
+                ? null
+                : {
+                    on: maximized,
+                    toggle: () => setMaximized((value) => !value),
+                  }
+            }
             onSelect={selectTab}
             onClose={(terminalId) => void closeTab(terminalId)}
             onNewTab={(scopeKey) => void openTab(scopeKey)}
@@ -582,12 +712,41 @@ export function FloatingTerminal() {
               onStatus={onStatus}
               onTitle={onTitle}
               onCtrlArmed={onCtrlArmed}
+              onFindRequested={openFind}
+              onScrollState={onScrollState}
+              onSearchResults={onSearchResults}
               onRequestRestart={onRequestRestart}
               onToggleRequested={hide}
               onPumpReady={onPumpReady}
               onPumpGone={onPumpGone}
             />
           ))}
+          {findOpen && state.tabs.length > 0 ? (
+            <FindBar
+              query={findQuery}
+              results={findResults}
+              onQueryChange={onFindQueryChange}
+              onNext={onFindNext}
+              onPrevious={onFindPrevious}
+              onClose={closeFind}
+            />
+          ) : null}
+
+          {/* Parked in history while output may still be arriving below. */}
+          {!atBottom && state.tabs.length > 0 ? (
+            <button
+              type="button"
+              className="bb-ft-pill"
+              onClick={() => {
+                activePump()?.scrollToBottom();
+                activePump()?.focus();
+              }}
+            >
+              <Icon name="ChevronsDown" className="size-3.5" aria-hidden="true" />
+              Latest
+            </button>
+          ) : null}
+
           {state.tabs.length === 0 ? (
             <EmptyState
               scopes={scopes}
@@ -604,7 +763,7 @@ export function FloatingTerminal() {
           <KeyToolbar ctrlArmed={ctrlArmed} onKey={onToolbarKey} />
         ) : null}
 
-        {sheet
+        {sheet || maximized
           ? null
           : RESIZE_EDGES.map((edge) => (
               <div

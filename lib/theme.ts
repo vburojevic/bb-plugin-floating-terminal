@@ -147,6 +147,11 @@ export function resolveTerminalTheme(scope: HTMLElement): ResolvedTheme {
       cursorAccent: background,
       // 45% alpha keeps the glyphs readable through the selection in both modes.
       selectionBackground: `${token(scope, "--primary", "#5b8cff")}73`,
+      // xterm 6's visible scrollbar is a VS Code slider painted from these,
+      // not from CSS — without them it ships VS Code grey into a bb window.
+      scrollbarSliderBackground: `${token(scope, "--muted-foreground", "#7a828e")}4d`,
+      scrollbarSliderHoverBackground: `${token(scope, "--muted-foreground", "#7a828e")}80`,
+      scrollbarSliderActiveBackground: `${token(scope, "--muted-foreground", "#7a828e")}a6`,
       ...ansi,
     },
   };

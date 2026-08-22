@@ -29,6 +29,8 @@ export interface TabBarProps {
   scopes: ScopeOption[];
   recentScopeKeys: string[];
   showHosts: boolean;
+  /** Window mode only; a sheet already fills the screen. */
+  maximize: { on: boolean; toggle: () => void } | null;
   onSelect: (terminalId: string) => void;
   onClose: (terminalId: string) => void;
   onNewTab: (scopeKey: string) => void;
@@ -119,6 +121,10 @@ function TabItem({
           aria-label={name}
           data-no-drag=""
           onClick={onSelect}
+          // The convention every browser and editor tab strip shares.
+          onAuxClick={(event) => {
+            if (event.button === 1) onClose();
+          }}
           onKeyDown={handleKeyDown}
           className={cn(
             "group flex h-6 max-w-40 shrink-0 cursor-default select-none items-center gap-1.5 rounded-md px-2 text-xs transition-colors",
@@ -177,6 +183,7 @@ export function TabBar({
   scopes,
   recentScopeKeys,
   showHosts,
+  maximize,
   onSelect,
   onClose,
   onNewTab,
@@ -186,7 +193,10 @@ export function TabBar({
   const activeTab = tabs.find((tab) => tab.terminalId === activeId) ?? null;
 
   return (
-    <div className="flex h-9 shrink-0 cursor-grab select-none items-center gap-1 border-b border-border bg-muted/40 pl-2 pr-1 active:cursor-grabbing">
+    <div
+      data-bb-ft-tabbar=""
+      className="flex h-9 shrink-0 cursor-grab select-none items-center gap-1 border-b border-border bg-muted/40 pl-2 pr-1 active:cursor-grabbing"
+    >
       {/* Hidden in sheet mode from styles.css: nothing there is draggable, and
           a grip that does nothing is worse than no grip. */}
       <span data-bb-ft-grip="" className="flex shrink-0 items-center">
@@ -236,6 +246,30 @@ export function TabBar({
           drag surface. */}
       <span className="h-full min-w-4 flex-1" />
 
+      {maximize === null ? null : (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              data-no-drag=""
+              data-bb-ft-action=""
+              className="size-6 shrink-0 text-muted-foreground"
+              onClick={maximize.toggle}
+              aria-label={maximize.on ? "Restore window size" : "Maximize window"}
+            >
+              <Icon
+                name={maximize.on ? "Minimize2" : "Maximize2"}
+                aria-hidden="true"
+              />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>
+            {maximize.on ? "Restore" : "Maximize"}
+          </TooltipContent>
+        </Tooltip>
+      )}
+
       {activeTab === null ? null : (
         <Tooltip>
           <TooltipTrigger asChild>
@@ -243,6 +277,7 @@ export function TabBar({
               variant="ghost"
               size="icon"
               data-no-drag=""
+              data-bb-ft-action=""
               className="size-6 shrink-0 text-muted-foreground"
               onClick={onRestart}
               aria-label="Restart shell"
@@ -260,6 +295,7 @@ export function TabBar({
             variant="ghost"
             size="icon"
             data-no-drag=""
+            data-bb-ft-action=""
             className="size-6 shrink-0 text-muted-foreground"
             onClick={onHide}
             aria-label="Hide terminal"

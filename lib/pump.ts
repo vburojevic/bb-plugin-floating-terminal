@@ -9,6 +9,7 @@
 // about tabs or windows; it reports status upward and asks for a restart when
 // the user presses Enter at a dead prompt.
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
@@ -66,6 +67,12 @@ export interface PumpOptions {
   onTitle?: (title: string | null) => void;
   /** The armed-Ctrl latch changed, so the bar can show it. */
   onCtrlArmed?: (armed: boolean) => void;
+  /** Cmd/Ctrl+F landed in the terminal; the window should open its find bar. */
+  onFindRequested?: () => void;
+  /** Whether the view sits at the newest output. Drives the jump-to-latest pill. */
+  onScrollState?: (atBottom: boolean) => void;
+  /** Match counts from an active search: null when the search is cleared. */
+  onSearchResults?: (results: { index: number; count: number } | null) => void;
 }
 
 export class TerminalPump {
@@ -113,6 +120,13 @@ export class TerminalPump {
     movedPx: 0,
   };
   private flingFrame: number | null = null;
+  /**
+   * Nullable, because 0.16 is the last stable search addon and xterm 6 has no
+   * contract with it — if it ever throws at load, the terminal keeps working
+   * and only the find bar goes inert.
+   */
+  private searchAddon: SearchAddon | null = null;
+  private lastAtBottom: boolean | null = null;
 
   constructor(options: PumpOptions) {
     this.options = options;
@@ -146,11 +160,30 @@ export class TerminalPump {
     // encountered glyph with synchronous layout reads, and once it exists that
     // cost is already paid. A machine without a working WebGL context falls
     // back to it silently.
+    try {
+      this.searchAddon = new SearchAddon();
+      this.terminal.loadAddon(this.searchAddon);
+      this.searchAddon.onDidChangeResults((results) => {
+        if (this.disposed) return;
+        this.options.onSearchResults?.({
+          index: results.resultIndex,
+          count: results.resultCount,
+        });
+      });
+    } catch {
+      this.searchAddon = null;
+    }
     this.loadWebglRenderer();
     this.terminal.open(options.container);
     this.observeContainer();
     this.warmSymbolFont();
     this.installTouchScroll();
+
+    // Both fire on the renderer's schedule: onScroll when the viewport moves,
+    // onWriteParsed when new output lands (which moves the bottom out from
+    // under a parked viewport).
+    this.terminal.onScroll(() => this.reportScrollState());
+    this.terminal.onWriteParsed(() => this.reportScrollState());
 
     this.terminal.onTitleChange((title) => {
       if (this.replayWrites > 0 || this.disposed) return;
@@ -180,6 +213,12 @@ export class TerminalPump {
       }
       if (event.ctrlKey && event.key === "`") {
         this.options.onToggleRequested();
+        return false;
+      }
+      // The browser's find is useless inside a canvas; reclaim it for the
+      // scrollback, the way every terminal-in-a-page does.
+      if ((event.metaKey || event.ctrlKey) && event.key === "f") {
+        this.options.onFindRequested?.();
         return false;
       }
       // Cmd/Ctrl+C must stay SIGINT unless there is something to copy.
@@ -240,6 +279,63 @@ export class TerminalPump {
     el.addEventListener("touchmove", this.onTouchMove, options);
     el.addEventListener("touchend", this.onTouchEnd, options);
     el.addEventListener("touchcancel", this.onTouchEnd, options);
+  }
+
+  private reportScrollState(): void {
+    if (this.disposed) return;
+    const buffer = this.terminal.buffer.active;
+    // The alternate buffer has no scrollback, so it always reads as bottom —
+    // which is right: the pill would be noise over vim or less.
+    const atBottom = buffer.viewportY >= buffer.baseY;
+    if (atBottom === this.lastAtBottom) return;
+    this.lastAtBottom = atBottom;
+    this.options.onScrollState?.(atBottom);
+  }
+
+  scrollToBottom(): void {
+    this.terminal.scrollToBottom();
+  }
+
+  // ------------------------------------------------------------------ find
+
+  /** Search options once, so every entry point highlights the same way. */
+  private searchOptions() {
+    const theme = this.terminal.options.theme ?? {};
+    const accent = theme.cursor ?? "#5b8cff";
+    return {
+      decorations: {
+        matchBackground: `${accent}40`,
+        matchBorder: `${accent}00`,
+        matchOverviewRuler: `${accent}66`,
+        activeMatchBackground: `${accent}a6`,
+        activeMatchBorder: `${accent}00`,
+        activeMatchColorOverviewRuler: accent,
+      },
+    };
+  }
+
+  /** True when the addon loaded; the find UI hides itself otherwise. */
+  searchAvailable(): boolean {
+    return this.searchAddon !== null;
+  }
+
+  /**
+   * `incremental` keeps the active match anchored while the query grows, which
+   * is what makes find-as-you-type read as refinement instead of jumping.
+   */
+  findNext(query: string, incremental = false): void {
+    if (this.searchAddon === null || query === "") return;
+    this.searchAddon.findNext(query, { ...this.searchOptions(), incremental });
+  }
+
+  findPrevious(query: string): void {
+    if (this.searchAddon === null || query === "") return;
+    this.searchAddon.findPrevious(query, this.searchOptions());
+  }
+
+  clearSearch(): void {
+    this.searchAddon?.clearDecorations();
+    this.options.onSearchResults?.(null);
   }
 
   /** Row height in CSS pixels, derived rather than measured per glyph. */
@@ -329,6 +425,9 @@ export class TerminalPump {
   };
 
   private startFling(initial: number): void {
+    // A glide is decorative; the drag itself already scrolled. Users who asked
+    // the platform for less motion get exactly the drag.
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
     let velocity = initial;
     const step = (): void => {
       if (this.disposed) return;

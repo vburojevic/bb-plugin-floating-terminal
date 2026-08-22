@@ -70,6 +70,7 @@ export const TOOLBAR_KEYS: readonly ToolbarKey[] = [
   { id: "ctrl-c", label: "^C", title: "Interrupt (Ctrl+C)", kind: "send", send: "\x03", emphasis: true },
   { id: "ctrl-d", label: "^D", title: "End of file (Ctrl+D)", kind: "send", send: "\x04" },
   { id: "ctrl-z", label: "^Z", title: "Suspend (Ctrl+Z)", kind: "send", send: "\x1a" },
+  { id: "ctrl-r", label: "^R", title: "History search (Ctrl+R)", kind: "send", send: "\x12" },
   { id: "home", label: "home", title: "Start of line", kind: "send", send: "\x01" },
   { id: "end", label: "end", title: "End of line", kind: "send", send: "\x05" },
   { id: "pipe", label: "|", title: "Pipe", kind: "send", send: "|" },
@@ -77,6 +78,7 @@ export const TOOLBAR_KEYS: readonly ToolbarKey[] = [
   { id: "slash", label: "/", title: "Slash", kind: "send", send: "/" },
   { id: "dash", label: "-", title: "Dash", kind: "send", send: "-" },
   { id: "underscore", label: "_", title: "Underscore", kind: "send", send: "_" },
+  { id: "find", label: "find", title: "Find in scrollback", kind: "action" },
   { id: "paste", label: "paste", title: "Paste from clipboard", kind: "action" },
   { id: "dismiss", label: "⌄", title: "Hide keyboard", kind: "action", emphasis: true },
 ];

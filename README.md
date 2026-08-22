@@ -35,6 +35,17 @@ footer next to Settings the moment it lands.
   the button that opened it.
 - **Restart in place.** The restart button kills a tab's shell and starts a
   fresh one in the same directory, keeping the tab where it is.
+- **Find in scrollback.** `Cmd/Ctrl+F` inside the terminal (or the `find` key
+  on the mobile bar) opens a small find bar: matches highlighted, counted, and
+  walked with Enter / Shift+Enter. Escape puts focus straight back at the
+  prompt.
+- **Maximize when you mean it.** A button — or double-clicking the tab bar,
+  the way every desktop titlebar works — grows the window to the viewport
+  minus a sliver, and restores to exactly where it was. Middle-click closes a
+  tab, as in every browser.
+- **Never lose the prompt.** Scroll up into history and a small "Latest" pill
+  appears; new output can land below without you noticing otherwise. It stays
+  out of the way in `vim` and `less`, where there is no scrollback to lose.
 - **The same terminal bb runs.** WebGL rendering, Unicode 11 widths, clickable
   links, bb's Nerd Font stack, 10 000 lines of scrollback — so a powerline
   prompt, a box-drawing TUI, and an emoji all land the same way they do in bb's
@@ -75,8 +86,8 @@ prompt stays where you can see it.
 bottom of the sheet — which is exactly where the keyboard pushes it, so it lands
 directly above the keys:
 
-`esc` `tab` `ctrl` `←` `↑` `↓` `→` `^C` `^D` `^Z` `home` `end` `|` `~` `/` `-`
-`_` `paste`, and one to dismiss the keyboard.
+`esc` `tab` `ctrl` `←` `↑` `↓` `→` `^C` `^D` `^Z` `^R` `home` `end` `|` `~`
+`/` `-` `_` `find` `paste`, and one to dismiss the keyboard.
 
 Ctrl is a latch, not a chord — you cannot hold two keys on a touch screen — so
 tapping it arms the modifier and the next character you type becomes its control

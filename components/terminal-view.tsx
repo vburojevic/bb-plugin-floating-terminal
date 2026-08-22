@@ -25,6 +25,15 @@ export interface TerminalViewProps {
   onTitle: (terminalId: string, title: string | null) => void;
   /** The on-screen bar's Ctrl latch changed inside this tab's terminal. */
   onCtrlArmed: (armed: boolean) => void;
+  /** Cmd/Ctrl+F landed inside this terminal. */
+  onFindRequested: () => void;
+  /** This tab's viewport reached, or left, the newest output. */
+  onScrollState: (terminalId: string, atBottom: boolean) => void;
+  /** Live match counts for a search in this tab; null once cleared. */
+  onSearchResults: (
+    terminalId: string,
+    results: { index: number; count: number } | null,
+  ) => void;
   onRequestRestart: (terminalId: string) => void;
   onToggleRequested: () => void;
   onPumpReady: (terminalId: string, pump: TerminalPump) => void;
@@ -41,6 +50,9 @@ export function TerminalView({
   onStatus,
   onTitle,
   onCtrlArmed,
+  onFindRequested,
+  onScrollState,
+  onSearchResults,
   onRequestRestart,
   onToggleRequested,
   onPumpReady,
@@ -55,6 +67,9 @@ export function TerminalView({
     onStatus,
     onTitle,
     onCtrlArmed,
+    onFindRequested,
+    onScrollState,
+    onSearchResults,
     onRequestRestart,
     onToggleRequested,
   });
@@ -62,6 +77,9 @@ export function TerminalView({
     onStatus,
     onTitle,
     onCtrlArmed,
+    onFindRequested,
+    onScrollState,
+    onSearchResults,
     onRequestRestart,
     onToggleRequested,
   };
@@ -79,6 +97,11 @@ export function TerminalView({
         handlersRef.current.onStatus(terminalId, status, detail),
       onTitle: (title) => handlersRef.current.onTitle(terminalId, title),
       onCtrlArmed: (armed) => handlersRef.current.onCtrlArmed(armed),
+      onFindRequested: () => handlersRef.current.onFindRequested(),
+      onScrollState: (bottom) =>
+        handlersRef.current.onScrollState(terminalId, bottom),
+      onSearchResults: (results) =>
+        handlersRef.current.onSearchResults(terminalId, results),
       onRequestRestart: () => handlersRef.current.onRequestRestart(terminalId),
       onToggleRequested: () => handlersRef.current.onToggleRequested(),
     });
