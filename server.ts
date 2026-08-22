@@ -9,11 +9,12 @@
 // Two rules make the client/server dance safe, and both matter much more on a
 // remote host where a round trip is ~100ms rather than ~2ms:
 //
-//  1. Every mutation runs inside `serialize`. Each one is a read-modify-write
-//     over a single kv array with awaits in the middle (listScopes, close,
-//     create), so overlapping calls would otherwise read the same snapshot and
-//     the last writer would silently drop the other's session — leaking a live
-//     PTY that no longer appears in any list.
+//  1. Every read-modify-write of the kv tab list runs inside `serialize`, so
+//     overlapping mutations cannot read the same snapshot and silently drop
+//     each other's session — leaking a live PTY that no longer appears in any
+//     list. The slow SDK calls (close, and above all create, which spawns a
+//     PTY) run *outside* the mutex: plugins share one process, and holding it
+//     across a slow host queued every other handler behind one open.
 //  2. Every response that carries tab state carries a monotonic `revision`.
 //     The client applies a snapshot only if it is newer than the last one it
 //     applied, so a slow `init` can never resurrect a closed tab or drop a
@@ -167,6 +168,15 @@ const SDK_TIMEOUT_MS = 1500;
 const CREATE_TIMEOUT_MS = 5000;
 /** How long a scopes listing may be served from cache. */
 const SCOPES_TTL_MS = 3000;
+/**
+ * How long a session status from the last `terminals.get` may answer idle
+ * reads. The pump polls every 320ms when quiet, and resolving status live on
+ * each of those put a second remote round trip behind every poll — against a
+ * remote host that alone held the handler for hundreds of milliseconds.
+ */
+const STATUS_TTL_MS = 2500;
+/** How long a verified tab snapshot may be composed from cache. */
+const SNAPSHOT_TTL_MS = 4000;
 
 class SdkTimeoutError extends Error {
   constructor(label: string, ms: number) {
@@ -337,14 +347,69 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** Last tab state we successfully resolved, per terminal id. */
   const lastKnownTabs = new Map<string, Tab>();
+  /** Last status `terminals.get` reported, per terminal id, for idle reads. */
+  const statusCache = new Map<
+    string,
+    { at: number; status: string; exitCode: number | null }
+  >();
+  /** When the tab list was last verified against the live sessions. */
+  let lastVerifiedAt = 0;
+
+  function rememberStatus(
+    terminalId: string,
+    status: string,
+    exitCode: number | null,
+  ): void {
+    statusCache.set(terminalId, { at: Date.now(), status, exitCode });
+  }
+
+  function forgetTab(terminalId: string): void {
+    lastKnownTabs.delete(terminalId);
+    statusCache.delete(terminalId);
+  }
+
+  function finishSnapshot(
+    tabs: Tab[],
+    revision: number,
+    storedActive: string | null | undefined,
+  ): Snapshot {
+    const activeTabId =
+      tabs.find((tab) => tab.terminalId === storedActive)?.terminalId ??
+      tabs[0]?.terminalId ??
+      null;
+    return { revision, tabs, activeTabId };
+  }
 
   /**
-   * Build the authoritative snapshot, dropping tabs whose session no longer
-   * exists. Always call inside `serialize` — it writes back the pruned list.
+   * Build the authoritative snapshot. In steady state this composes from the
+   * in-memory tab cache and kv alone — no SDK round trips — because every
+   * mutation keeps the cache current. The live verification (which is also
+   * what drops tabs whose session no longer exists) runs only when the cache
+   * is stale, incomplete after a reload, or invalidated by a read that saw a
+   * session die. Always call inside `serialize` — a verification writes back
+   * the pruned list.
    */
   async function snapshot(): Promise<Snapshot> {
-    const [stored, scopes, storedActive] = await Promise.all([
-      readStoredTabs(),
+    const stored = await readStoredTabs();
+    if (
+      Date.now() - lastVerifiedAt < SNAPSHOT_TTL_MS &&
+      stored.every((entry) => lastKnownTabs.has(entry.terminalId))
+    ) {
+      const [revision, storedActive] = await Promise.all([
+        bb.storage.kv.get<number>(REVISION_KEY),
+        bb.storage.kv.get<string>(ACTIVE_TAB_KEY),
+      ]);
+      return finishSnapshot(
+        stored.map((entry) => lastKnownTabs.get(entry.terminalId)!),
+        revision ?? 0,
+        storedActive,
+      );
+    }
+    return verifiedSnapshot(stored);
+  }
+
+  async function verifiedSnapshot(stored: StoredTab[]): Promise<Snapshot> {
+    const [scopes, storedActive] = await Promise.all([
       listScopes(),
       bb.storage.kv.get<string>(ACTIVE_TAB_KEY),
     ]);
@@ -361,6 +426,7 @@ export default async function plugin(bb: BbPluginApi) {
             SDK_TIMEOUT_MS,
             "terminals.get",
           );
+          rememberStatus(session.id, session.status, session.exitCode);
           if (!isLiveStatus(session.status)) return null;
           const scope =
             scopes.find((item) => item.key === entry.scopeKey) ?? null;
@@ -390,7 +456,7 @@ export default async function plugin(bb: BbPluginApi) {
             return lastKnownTabs.get(entry.terminalId) ?? null;
           }
           // Session is gone entirely; drop the tab.
-          lastKnownTabs.delete(entry.terminalId);
+          forgetTab(entry.terminalId);
           return null;
         }
       }),
@@ -407,12 +473,10 @@ export default async function plugin(bb: BbPluginApi) {
       revision = await bumpRevision();
     }
 
-    const activeTabId =
-      tabs.find((tab) => tab.terminalId === storedActive)?.terminalId ??
-      tabs[0]?.terminalId ??
-      null;
-
-    return { revision, tabs, activeTabId };
+    // A timed-out host answered from last-known state; retrying inside the
+    // TTL would only re-block on the same slow host, so stamp either way.
+    lastVerifiedAt = Date.now();
+    return finishSnapshot(tabs, revision, storedActive);
   }
 
   async function requireScope(scopeKey: string): Promise<Scope> {
@@ -475,32 +539,40 @@ export default async function plugin(bb: BbPluginApi) {
       };
     },
 
-    openTab({ scopeKey, cols, rows }) {
+    async openTab({ scopeKey, cols, rows }) {
+      // The slow parts — resolving the scope and spawning the PTY — run
+      // outside the mutation mutex. Held across a create they queued every
+      // other handler (init from another window, closes, the read polls)
+      // behind one slow host for up to the whole create timeout.
+      const scope = await requireScope(scopeKey);
+      const opened = await createSession(scope, cols, rows);
       return serialize(async () => {
-        const scope = await requireScope(scopeKey);
-        const opened = await createSession(scope, cols, rows);
         const stored = await readStoredTabs();
         stored.push({ terminalId: opened.terminalId, scopeKey: opened.scopeKey });
         await bb.storage.kv.set(TABS_KEY, stored);
         await bb.storage.kv.set(ACTIVE_TAB_KEY, opened.terminalId);
         await rememberRecent(opened.scopeKey);
         await bumpRevision();
+        lastKnownTabs.set(opened.terminalId, opened);
+        rememberStatus(opened.terminalId, opened.status, opened.exitCode);
         return { snapshot: await snapshot(), opened };
       });
     },
 
-    closeTab({ terminalId }) {
+    async closeTab({ terminalId }) {
+      // Best-effort, outside the mutex: waiting under it for a slow host to
+      // confirm the close blocked every other handler for the full timeout.
+      try {
+        await withTimeout(
+          bb.sdk.terminals.close({ terminalId, mode: "force" }),
+          SDK_TIMEOUT_MS,
+          "terminals.close",
+        );
+      } catch {
+        // Already gone (or the host is slow to confirm); removing the tab
+        // is still the right outcome.
+      }
       return serialize(async () => {
-        try {
-          await withTimeout(
-            bb.sdk.terminals.close({ terminalId, mode: "force" }),
-            SDK_TIMEOUT_MS,
-            "terminals.close",
-          );
-        } catch {
-          // Already gone (or the host is slow to confirm); removing the tab
-          // is still the right outcome.
-        }
         const remaining = (await readStoredTabs()).filter(
           (entry) => entry.terminalId !== terminalId,
         );
@@ -512,6 +584,7 @@ export default async function plugin(bb: BbPluginApi) {
           if (next === undefined) await bb.storage.kv.delete(ACTIVE_TAB_KEY);
           else await bb.storage.kv.set(ACTIVE_TAB_KEY, next);
         }
+        forgetTab(terminalId);
         await bumpRevision();
         return { snapshot: await snapshot() };
       });
@@ -522,62 +595,97 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: true };
     },
 
-    renameTab({ terminalId, title }) {
-      return serialize(async () => {
-        const stored = await readStoredTabs();
-        const entry = stored.find((tab) => tab.terminalId === terminalId);
-        // Renaming a tab this window does not own would let a stale client
-        // rename somebody else's session out from under them.
-        if (entry === undefined) return { snapshot: await snapshot() };
+    async renameTab({ terminalId, title }) {
+      // The rename round trip happens before taking the mutex; it touches no
+      // plugin state, and a concurrent close simply makes it fail like a
+      // dead session always could.
+      const stored = await readStoredTabs();
+      const entry = stored.find((tab) => tab.terminalId === terminalId);
+      // Renaming a tab this window does not own would let a stale client
+      // rename somebody else's session out from under them.
+      if (entry === undefined) {
+        return serialize(async () => ({ snapshot: await snapshot() }));
+      }
 
-        // Null means "go back to the name the tab was opened with", which is
-        // what the tab strip falls back to showing.
-        const scope = (await listScopes()).find(
-          (item) => item.key === entry.scopeKey,
+      // Null means "go back to the name the tab was opened with", which is
+      // what the tab strip falls back to showing.
+      const scope = (await listScopes()).find(
+        (item) => item.key === entry.scopeKey,
+      );
+      const restored =
+        scope === undefined ? null : defaultTitle(scope.label, scope.hostName);
+      const next = title ?? restored;
+      if (next === null) {
+        return serialize(async () => ({ snapshot: await snapshot() }));
+      }
+
+      try {
+        await withTimeout(
+          bb.sdk.terminals.rename({ terminalId, title: next }),
+          SDK_TIMEOUT_MS,
+          "terminals.rename",
         );
-        const restored =
-          scope === undefined
-            ? null
-            : defaultTitle(scope.label, scope.hostName);
-        const next = title ?? restored;
-        if (next === null) return { snapshot: await snapshot() };
-
-        try {
-          await withTimeout(
-            bb.sdk.terminals.rename({ terminalId, title: next }),
-            SDK_TIMEOUT_MS,
-            "terminals.rename",
-          );
-        } catch {
-          // A name is not worth failing a turn over; the next snapshot still
-          // carries whatever the session actually holds.
-          return { snapshot: await snapshot() };
+      } catch {
+        // A name is not worth failing a turn over; the next snapshot still
+        // carries whatever the session actually holds.
+        return serialize(async () => ({ snapshot: await snapshot() }));
+      }
+      return serialize(async () => {
+        const known = lastKnownTabs.get(terminalId);
+        if (known !== undefined) {
+          lastKnownTabs.set(terminalId, {
+            ...known,
+            shellTitle: meaningfulShellTitle(next, {
+              label: known.label,
+              defaultTitle: defaultTitle(known.label, known.hostName),
+              cwd: known.cwd,
+            }),
+          });
         }
         await bumpRevision();
         return { snapshot: await snapshot() };
       });
     },
 
-    restartTab({ terminalId, cols, rows }) {
+    async restartTab({ terminalId, cols, rows }) {
+      // Close + create are the two slowest calls this plugin makes, so they
+      // run between two short serialized sections instead of holding the
+      // mutex for their combined timeouts.
+      const found = (await readStoredTabs()).find(
+        (entry) => entry.terminalId === terminalId,
+      );
+      if (found === undefined) throw new Error("That tab is no longer open.");
+
+      const scope = await requireScope(found.scopeKey);
+      try {
+        await withTimeout(
+          bb.sdk.terminals.close({ terminalId, mode: "force" }),
+          SDK_TIMEOUT_MS,
+          "terminals.close",
+        );
+      } catch {
+        // Already dead — that is why we are restarting.
+      }
+
+      const restarted = await createSession(scope, cols, rows);
       return serialize(async () => {
         const stored = await readStoredTabs();
         const index = stored.findIndex(
           (entry) => entry.terminalId === terminalId,
         );
-        if (index === -1) throw new Error("That tab is no longer open.");
-
-        const scope = await requireScope(stored[index]!.scopeKey);
-        try {
-          await withTimeout(
-            bb.sdk.terminals.close({ terminalId, mode: "force" }),
+        if (index === -1) {
+          // The tab was closed while the new shell was spawning. Do not leak
+          // the session a strip will never show; best-effort, detached.
+          withTimeout(
+            bb.sdk.terminals.close({
+              terminalId: restarted.terminalId,
+              mode: "force",
+            }),
             SDK_TIMEOUT_MS,
             "terminals.close",
-          );
-        } catch {
-          // Already dead — that is why we are restarting.
+          ).catch(() => {});
+          throw new Error("That tab is no longer open.");
         }
-
-        const restarted = await createSession(scope, cols, rows);
         // Replace in place so the tab keeps its position in the strip.
         stored[index] = {
           terminalId: restarted.terminalId,
@@ -588,6 +696,9 @@ export default async function plugin(bb: BbPluginApi) {
         if (storedActive === terminalId) {
           await bb.storage.kv.set(ACTIVE_TAB_KEY, restarted.terminalId);
         }
+        forgetTab(terminalId);
+        lastKnownTabs.set(restarted.terminalId, restarted);
+        rememberStatus(restarted.terminalId, restarted.status, restarted.exitCode);
         await bumpRevision();
         return { snapshot: await snapshot(), restarted };
       });
@@ -605,13 +716,27 @@ export default async function plugin(bb: BbPluginApi) {
           "terminals.output",
         );
         if (output.chunks.length > 0) {
+          // Bytes are flowing, so the shell is alive by definition.
+          rememberStatus(terminalId, "running", null);
           return { ...output, status: null, exitCode: null };
+        }
+        // This is the hot polling path — every idle window polls it at up to
+        // ~3Hz — so the status round trip runs at most once per TTL rather
+        // than doubling every poll against a possibly-remote host.
+        const cached = statusCache.get(terminalId);
+        if (cached !== undefined && Date.now() - cached.at < STATUS_TTL_MS) {
+          return { ...output, status: cached.status, exitCode: cached.exitCode };
         }
         const session = await withTimeout(
           bb.sdk.terminals.get({ terminalId }),
           SDK_TIMEOUT_MS,
           "terminals.get",
         );
+        rememberStatus(terminalId, session.status, session.exitCode);
+        if (!isLiveStatus(session.status)) {
+          // The next snapshot must see this die and prune the tab.
+          lastVerifiedAt = 0;
+        }
         return {
           ...output,
           status: session.status,
@@ -631,6 +756,8 @@ export default async function plugin(bb: BbPluginApi) {
         }
         // The session was closed out from under us. Report it instead of
         // throwing so the window can offer a restart.
+        rememberStatus(terminalId, "gone", null);
+        lastVerifiedAt = 0;
         return {
           chunks: [],
           nextSeq: sinceSeq,

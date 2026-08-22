@@ -14661,6 +14661,8 @@ var rpcContract = defineRpcContract({
 var SDK_TIMEOUT_MS = 1500;
 var CREATE_TIMEOUT_MS = 5e3;
 var SCOPES_TTL_MS = 3e3;
+var STATUS_TTL_MS = 2500;
+var SNAPSHOT_TTL_MS = 4e3;
 var SdkTimeoutError = class extends Error {
   constructor(label, ms) {
     super(`${label} timed out after ${ms}ms`);
@@ -14788,9 +14790,36 @@ async function plugin(bb) {
     return hostName === "" ? label : `${label} \xB7 ${hostName}`;
   }
   const lastKnownTabs = /* @__PURE__ */ new Map();
+  const statusCache = /* @__PURE__ */ new Map();
+  let lastVerifiedAt = 0;
+  function rememberStatus(terminalId, status, exitCode) {
+    statusCache.set(terminalId, { at: Date.now(), status, exitCode });
+  }
+  function forgetTab(terminalId) {
+    lastKnownTabs.delete(terminalId);
+    statusCache.delete(terminalId);
+  }
+  function finishSnapshot(tabs, revision, storedActive) {
+    const activeTabId = tabs.find((tab) => tab.terminalId === storedActive)?.terminalId ?? tabs[0]?.terminalId ?? null;
+    return { revision, tabs, activeTabId };
+  }
   async function snapshot() {
-    const [stored, scopes, storedActive] = await Promise.all([
-      readStoredTabs(),
+    const stored = await readStoredTabs();
+    if (Date.now() - lastVerifiedAt < SNAPSHOT_TTL_MS && stored.every((entry) => lastKnownTabs.has(entry.terminalId))) {
+      const [revision, storedActive] = await Promise.all([
+        bb.storage.kv.get(REVISION_KEY),
+        bb.storage.kv.get(ACTIVE_TAB_KEY)
+      ]);
+      return finishSnapshot(
+        stored.map((entry) => lastKnownTabs.get(entry.terminalId)),
+        revision ?? 0,
+        storedActive
+      );
+    }
+    return verifiedSnapshot(stored);
+  }
+  async function verifiedSnapshot(stored) {
+    const [scopes, storedActive] = await Promise.all([
       listScopes(),
       bb.storage.kv.get(ACTIVE_TAB_KEY)
     ]);
@@ -14803,6 +14832,7 @@ async function plugin(bb) {
             SDK_TIMEOUT_MS,
             "terminals.get"
           );
+          rememberStatus(session.id, session.status, session.exitCode);
           if (!isLiveStatus(session.status)) return null;
           const scope = scopes.find((item) => item.key === entry.scopeKey) ?? null;
           const label = scope?.label ?? labelFromCwd(session.initialCwd);
@@ -14828,7 +14858,7 @@ async function plugin(bb) {
             sawTimeout = true;
             return lastKnownTabs.get(entry.terminalId) ?? null;
           }
-          lastKnownTabs.delete(entry.terminalId);
+          forgetTab(entry.terminalId);
           return null;
         }
       })
@@ -14842,8 +14872,8 @@ async function plugin(bb) {
       );
       revision = await bumpRevision();
     }
-    const activeTabId = tabs.find((tab) => tab.terminalId === storedActive)?.terminalId ?? tabs[0]?.terminalId ?? null;
-    return { revision, tabs, activeTabId };
+    lastVerifiedAt = Date.now();
+    return finishSnapshot(tabs, revision, storedActive);
   }
   async function requireScope(scopeKey) {
     const scope = (await listScopes()).find((entry) => entry.key === scopeKey);
@@ -14898,29 +14928,31 @@ async function plugin(bb) {
         }
       };
     },
-    openTab({ scopeKey, cols, rows }) {
+    async openTab({ scopeKey, cols, rows }) {
+      const scope = await requireScope(scopeKey);
+      const opened = await createSession(scope, cols, rows);
       return serialize(async () => {
-        const scope = await requireScope(scopeKey);
-        const opened = await createSession(scope, cols, rows);
         const stored = await readStoredTabs();
         stored.push({ terminalId: opened.terminalId, scopeKey: opened.scopeKey });
         await bb.storage.kv.set(TABS_KEY, stored);
         await bb.storage.kv.set(ACTIVE_TAB_KEY, opened.terminalId);
         await rememberRecent(opened.scopeKey);
         await bumpRevision();
+        lastKnownTabs.set(opened.terminalId, opened);
+        rememberStatus(opened.terminalId, opened.status, opened.exitCode);
         return { snapshot: await snapshot(), opened };
       });
     },
-    closeTab({ terminalId }) {
+    async closeTab({ terminalId }) {
+      try {
+        await withTimeout(
+          bb.sdk.terminals.close({ terminalId, mode: "force" }),
+          SDK_TIMEOUT_MS,
+          "terminals.close"
+        );
+      } catch {
+      }
       return serialize(async () => {
-        try {
-          await withTimeout(
-            bb.sdk.terminals.close({ terminalId, mode: "force" }),
-            SDK_TIMEOUT_MS,
-            "terminals.close"
-          );
-        } catch {
-        }
         const remaining = (await readStoredTabs()).filter(
           (entry) => entry.terminalId !== terminalId
         );
@@ -14931,6 +14963,7 @@ async function plugin(bb) {
           if (next === void 0) await bb.storage.kv.delete(ACTIVE_TAB_KEY);
           else await bb.storage.kv.set(ACTIVE_TAB_KEY, next);
         }
+        forgetTab(terminalId);
         await bumpRevision();
         return { snapshot: await snapshot() };
       });
@@ -14939,47 +14972,77 @@ async function plugin(bb) {
       await bb.storage.kv.set(ACTIVE_TAB_KEY, terminalId);
       return { ok: true };
     },
-    renameTab({ terminalId, title }) {
-      return serialize(async () => {
-        const stored = await readStoredTabs();
-        const entry = stored.find((tab) => tab.terminalId === terminalId);
-        if (entry === void 0) return { snapshot: await snapshot() };
-        const scope = (await listScopes()).find(
-          (item) => item.key === entry.scopeKey
+    async renameTab({ terminalId, title }) {
+      const stored = await readStoredTabs();
+      const entry = stored.find((tab) => tab.terminalId === terminalId);
+      if (entry === void 0) {
+        return serialize(async () => ({ snapshot: await snapshot() }));
+      }
+      const scope = (await listScopes()).find(
+        (item) => item.key === entry.scopeKey
+      );
+      const restored = scope === void 0 ? null : defaultTitle(scope.label, scope.hostName);
+      const next = title ?? restored;
+      if (next === null) {
+        return serialize(async () => ({ snapshot: await snapshot() }));
+      }
+      try {
+        await withTimeout(
+          bb.sdk.terminals.rename({ terminalId, title: next }),
+          SDK_TIMEOUT_MS,
+          "terminals.rename"
         );
-        const restored = scope === void 0 ? null : defaultTitle(scope.label, scope.hostName);
-        const next = title ?? restored;
-        if (next === null) return { snapshot: await snapshot() };
-        try {
-          await withTimeout(
-            bb.sdk.terminals.rename({ terminalId, title: next }),
-            SDK_TIMEOUT_MS,
-            "terminals.rename"
-          );
-        } catch {
-          return { snapshot: await snapshot() };
+      } catch {
+        return serialize(async () => ({ snapshot: await snapshot() }));
+      }
+      return serialize(async () => {
+        const known = lastKnownTabs.get(terminalId);
+        if (known !== void 0) {
+          lastKnownTabs.set(terminalId, {
+            ...known,
+            shellTitle: meaningfulShellTitle(next, {
+              label: known.label,
+              defaultTitle: defaultTitle(known.label, known.hostName),
+              cwd: known.cwd
+            })
+          });
         }
         await bumpRevision();
         return { snapshot: await snapshot() };
       });
     },
-    restartTab({ terminalId, cols, rows }) {
+    async restartTab({ terminalId, cols, rows }) {
+      const found = (await readStoredTabs()).find(
+        (entry) => entry.terminalId === terminalId
+      );
+      if (found === void 0) throw new Error("That tab is no longer open.");
+      const scope = await requireScope(found.scopeKey);
+      try {
+        await withTimeout(
+          bb.sdk.terminals.close({ terminalId, mode: "force" }),
+          SDK_TIMEOUT_MS,
+          "terminals.close"
+        );
+      } catch {
+      }
+      const restarted = await createSession(scope, cols, rows);
       return serialize(async () => {
         const stored = await readStoredTabs();
         const index = stored.findIndex(
           (entry) => entry.terminalId === terminalId
         );
-        if (index === -1) throw new Error("That tab is no longer open.");
-        const scope = await requireScope(stored[index].scopeKey);
-        try {
-          await withTimeout(
-            bb.sdk.terminals.close({ terminalId, mode: "force" }),
+        if (index === -1) {
+          withTimeout(
+            bb.sdk.terminals.close({
+              terminalId: restarted.terminalId,
+              mode: "force"
+            }),
             SDK_TIMEOUT_MS,
             "terminals.close"
-          );
-        } catch {
+          ).catch(() => {
+          });
+          throw new Error("That tab is no longer open.");
         }
-        const restarted = await createSession(scope, cols, rows);
         stored[index] = {
           terminalId: restarted.terminalId,
           scopeKey: restarted.scopeKey
@@ -14989,6 +15052,9 @@ async function plugin(bb) {
         if (storedActive === terminalId) {
           await bb.storage.kv.set(ACTIVE_TAB_KEY, restarted.terminalId);
         }
+        forgetTab(terminalId);
+        lastKnownTabs.set(restarted.terminalId, restarted);
+        rememberStatus(restarted.terminalId, restarted.status, restarted.exitCode);
         await bumpRevision();
         return { snapshot: await snapshot(), restarted };
       });
@@ -15005,13 +15071,22 @@ async function plugin(bb) {
           "terminals.output"
         );
         if (output.chunks.length > 0) {
+          rememberStatus(terminalId, "running", null);
           return { ...output, status: null, exitCode: null };
+        }
+        const cached2 = statusCache.get(terminalId);
+        if (cached2 !== void 0 && Date.now() - cached2.at < STATUS_TTL_MS) {
+          return { ...output, status: cached2.status, exitCode: cached2.exitCode };
         }
         const session = await withTimeout(
           bb.sdk.terminals.get({ terminalId }),
           SDK_TIMEOUT_MS,
           "terminals.get"
         );
+        rememberStatus(terminalId, session.status, session.exitCode);
+        if (!isLiveStatus(session.status)) {
+          lastVerifiedAt = 0;
+        }
         return {
           ...output,
           status: session.status,
@@ -15027,6 +15102,8 @@ async function plugin(bb) {
             exitCode: null
           };
         }
+        rememberStatus(terminalId, "gone", null);
+        lastVerifiedAt = 0;
         return {
           chunks: [],
           nextSeq: sinceSeq,
