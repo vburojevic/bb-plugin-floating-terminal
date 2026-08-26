@@ -11,6 +11,7 @@ import {
   tabsReducer,
   type ServerTab,
   type Snapshot,
+  type TabState,
   type TabsState,
 } from "./tabs";
 
@@ -166,6 +167,19 @@ describe("tabsReducer — snapshot ordering", () => {
 });
 
 describe("shell titles", () => {
+  it("keeps the machine visible when several hosts are available", () => {
+    const tab: TabState = {
+      ...serverTab("a", {
+        hostName: "scw-mini",
+        shellTitle: "m1",
+      }),
+      status: "live",
+      statusDetail: null,
+    };
+
+    expect(tabName(tab, true)).toBe("m1 · scw-mini");
+  });
+
   it("flows a new server title onto a tab the client already knows", () => {
     let state = tabsReducer(emptyTabs, {
       type: "synced",

@@ -23,8 +23,8 @@ footer next to Settings the moment it lands.
   log view. `+` opens another one in any project checkout or any machine's home
   directory.
 - **Multi-machine.** Every connected bb machine is offered, so a tab can be a
-  shell on a remote box. Paths are qualified as `host:path` once you have more
-  than one machine, and an offline machine says so instead of failing on click.
+  shell on a remote box. Paths and tab titles keep the machine visible once you
+  have more than one, and an offline machine says so instead of failing on click.
 - **It survives everything short of a reboot.** Open tabs are persisted, so
   closing the window, reloading the app, or restarting bb reattaches to the
   same shells with their scrollback intact. A shell that died while you were
@@ -124,10 +124,12 @@ codepoints nothing else can.
 
 A tab is named for the directory it runs in, and takes the shell's title when
 the shell sets one worth having — `npm run dev` while that is running, back to
-`Acme Storefront` at the prompt. Titles that only restate the location
-(`user@host:~/Git/acme`, `acme-storefront:main`) are ignored, because the tab
-already says that; the directory stays in the tooltip either way. The rename
-lands on the bb session itself, so `bb terminal list` shows the same name.
+`Acme Storefront` at the prompt. With several connected machines it keeps the
+host alongside either title, so a remote shell cannot look local. Titles that
+only restate the location (`user@host:~/Git/acme`,
+`acme-storefront:main`) are ignored, because the tab already says that; the
+directory stays in the tooltip either way. The rename lands on the bb session
+itself, so `bb terminal list` shows the same name.
 
 ## Settings
 

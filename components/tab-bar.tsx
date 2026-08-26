@@ -91,16 +91,18 @@ export function NewTabMenu({
 function TabItem({
   tab,
   active,
+  showHost,
   onSelect,
   onClose,
 }: {
   tab: TabState;
   active: boolean;
+  showHost: boolean;
   onSelect: () => void;
   onClose: () => void;
 }) {
   const dot = statusDotClass(tab);
-  const name = tabName(tab);
+  const name = tabName(tab, showHost);
 
   function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     if (event.key === "Enter" || event.key === " ") {
@@ -159,8 +161,6 @@ function TabItem({
         </div>
       </TooltipTrigger>
       <TooltipContent>
-        {/* Once a shell title takes over the tab, this is the only place left
-            that still says where the shell actually runs. */}
         {tab.shellTitle === null ? null : (
           <span className="block text-xs">{tab.label}</span>
         )}
@@ -218,6 +218,7 @@ export function TabBar({
               key={tab.terminalId}
               tab={tab}
               active={tab.terminalId === activeId}
+              showHost={showHosts}
               onSelect={() => onSelect(tab.terminalId)}
               onClose={() => onClose(tab.terminalId)}
             />

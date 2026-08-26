@@ -23,9 +23,10 @@ export interface TabState {
   shellTitle: string | null;
 }
 
-/** What the tab strip shows: what the shell called itself, else where it runs. */
-export function tabName(tab: TabState): string {
-  return tab.shellTitle ?? tab.label;
+/** What the tab strip shows, qualified when another machine could be mistaken for this one. */
+export function tabName(tab: TabState, showHost = false): string {
+  const name = tab.shellTitle ?? tab.label;
+  return showHost && tab.hostName !== "" ? `${name} · ${tab.hostName}` : name;
 }
 
 export interface TabsState {
