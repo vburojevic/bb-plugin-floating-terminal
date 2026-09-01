@@ -241,3 +241,10 @@ consumers never need npm.
 [Nerd Fonts](https://github.com/ryanoasis/nerd-fonts) (MIT — see
 `fonts/LICENSE-nerd-fonts`), which aggregates icon sets under their own upstream
 licences. See `fonts/README.md` for provenance and how to rebuild it.
+
+---
+
+## More bb plugins
+
+This is one of eight bb plugins I publish — see them all at
+[**vburojevic/bb-plugins**](https://github.com/vburojevic/bb-plugins).
