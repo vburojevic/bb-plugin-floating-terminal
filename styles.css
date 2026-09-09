@@ -276,6 +276,29 @@
 }
 
 /*
+ * Portaled overlays, above the window that hosts them.
+ *
+ * Radix mounts menu, select, and tooltip content into document.body with no
+ * `container`, so their z-50 lands in the page's stacking context rather than
+ * inside the window — and raising the window to 55 above put it on top of
+ * every one of them. The tab bar's `+` menu still opened; it painted behind
+ * the terminal. 60 clears the window and stays under the 70 bb keeps for its
+ * own dialogs and toasts.
+ *
+ * Set on the CONTENT, not the popper wrapper. Radix reads the content's
+ * computed z-index and copies it onto the wrapper as an INLINE style
+ * (@radix-ui/react-popper: getComputedStyle(content).zIndex -> wrapper
+ * style.zIndex), so a rule aimed at the wrapper loses to that inline value,
+ * while raising the content carries the wrapper up with it.
+ *
+ * The attribute is doubled to score (0,2,0) so it outranks the `z-50` utility
+ * on the same element; a single attribute ties and loses on source order.
+ */
+[data-bb-portaled-overlay][data-bb-portaled-overlay] {
+  z-index: 60;
+}
+
+/*
  * The terminal owns vertical dragging on a touch screen.
  *
  * xterm 6 has no touch scrolling of its own, so lib/pump.ts translates a drag
