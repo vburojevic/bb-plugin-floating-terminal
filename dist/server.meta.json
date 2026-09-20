@@ -1,11 +1,11 @@
 {
   "sdkMajor": 0,
-  "sdkVersion": "0.4.34",
+  "sdkVersion": "0.4.104",
   "artifactFormatVersion": 1,
   "pluginId": "floating-terminal",
-  "pluginVersion": "0.5.2",
+  "pluginVersion": "0.5.3",
   "builtWith": {
-    "bbVersion": "0.41.0",
-    "pluginSdkVersion": "0.4.34"
+    "bbVersion": "0.43.3",
+    "pluginSdkVersion": "0.4.104"
   }
 }
