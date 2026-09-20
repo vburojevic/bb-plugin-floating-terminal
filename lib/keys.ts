@@ -82,3 +82,30 @@ export const TOOLBAR_KEYS: readonly ToolbarKey[] = [
   { id: "paste", label: "paste", title: "Paste from clipboard", kind: "action" },
   { id: "dismiss", label: "⌄", title: "Hide keyboard", kind: "action", emphasis: true },
 ];
+
+/**
+ * Cmd/Ctrl+Shift+[ or ]: the tab-cycling chord every browser and editor
+ * shares. Checked on `code` as well as `key`, because with Shift held the
+ * brackets report as `{` and `}` on a US layout and as something else entirely
+ * on many others.
+ */
+export function isTabCycleKey(event: {
+  key: string;
+  code: string;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  shiftKey: boolean;
+  altKey: boolean;
+}): boolean {
+  if (!(event.metaKey || event.ctrlKey) || !event.shiftKey || event.altKey) {
+    return false;
+  }
+  return tabCycleDirection(event) !== null;
+}
+
+/** -1 for the previous tab, 1 for the next, null when it is not the chord. */
+export function tabCycleDirection(event: { key: string; code: string }): -1 | 1 | null {
+  if (event.code === "BracketLeft" || event.key === "[" || event.key === "{") return -1;
+  if (event.code === "BracketRight" || event.key === "]" || event.key === "}") return 1;
+  return null;
+}

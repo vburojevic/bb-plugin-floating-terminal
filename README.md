@@ -42,7 +42,8 @@ footer next to Settings the moment it lands.
 - **Maximize when you mean it.** A button — or double-clicking the tab bar,
   the way every desktop titlebar works — grows the window to the viewport
   minus a sliver, and restores to exactly where it was. Middle-click closes a
-  tab, as in every browser.
+  tab, as in every browser, and `Cmd/Ctrl+Shift+[` and `]` step through the
+  tabs the way they do in one.
 - **Never lose the prompt.** Scroll up into history and a small "Latest" pill
   appears; new output can land below without you noticing otherwise. It stays
   out of the way in `vim` and `less`, where there is no scrollback to lose.

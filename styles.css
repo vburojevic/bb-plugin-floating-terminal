@@ -51,6 +51,21 @@
   padding: 0;
 }
 
+/*
+ * The black line along the bottom edge.
+ *
+ * xterm 6 paints the theme background on its scrollable element, whose height
+ * is rows x cell height — and the body box is almost never an exact multiple
+ * of a cell. Underneath it, xterm.css still ships the legacy `.xterm-viewport`
+ * at `inset: 0` with a hard-coded `background-color: #000`, so the sub-row
+ * remainder at the bottom showed as a black strip in every theme but black.
+ * Transparent lets the window's own surface through, which is what the theme
+ * background was derived from in the first place.
+ */
+.bb-ft-window .xterm .xterm-viewport {
+  background-color: transparent;
+}
+
 /* The tab strip scrolls horizontally without showing a scrollbar. */
 .bb-ft-window [role="tablist"] {
   scrollbar-width: none;

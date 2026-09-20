@@ -16,6 +16,7 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { toast } from "sonner";
 import { Icon } from "@/components/ui/icon";
@@ -38,7 +39,12 @@ import {
   type Frame,
 } from "@/lib/frame";
 import type { TerminalPump } from "@/lib/pump";
-import { arrowSequence, type ToolbarKey } from "@/lib/keys";
+import {
+  arrowSequence,
+  isTabCycleKey,
+  tabCycleDirection,
+  type ToolbarKey,
+} from "@/lib/keys";
 import { createRpcClient } from "@/lib/rpc";
 import { trackVisualViewport } from "@/lib/viewport";
 import { emptyTabs, tabsReducer, type TabStatus } from "@/lib/tabs";
@@ -334,6 +340,34 @@ export function FloatingTerminal() {
       });
     },
     [rpc],
+  );
+
+  /**
+   * Cmd/Ctrl+Shift+[ and ] step through the strip with wrap-around. Handled on
+   * the window rather than in the pump so it also works with a tab, the picker,
+   * or the find bar focused; the pump only declines to eat the key.
+   */
+  const tabsRef = useRef(state.tabs);
+  tabsRef.current = state.tabs;
+  const cycleTab = useCallback(
+    (delta: 1 | -1) => {
+      const tabs = tabsRef.current;
+      if (tabs.length < 2) return;
+      const index = tabs.findIndex((tab) => tab.terminalId === activeIdRef.current);
+      const next = tabs[(index + delta + tabs.length) % tabs.length];
+      if (next !== undefined) selectTab(next.terminalId);
+    },
+    [selectTab],
+  );
+
+  const onWindowKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (!isTabCycleKey(event)) return;
+      event.preventDefault();
+      const direction = tabCycleDirection(event);
+      if (direction !== null) cycleTab(direction);
+    },
+    [cycleTab],
   );
 
   // ----------------------------------------------------------------- init
@@ -658,6 +692,7 @@ export function FloatingTerminal() {
         aria-hidden={!open}
         data-state={open && armed ? "open" : "closed"}
         data-layout={sheet ? "sheet" : "window"}
+        onKeyDown={onWindowKeyDown}
         // Stacking lives in styles.css, where the backdrop and window are kept in
         // one place relative to bb's own layers.
         className="bb-ft-window fixed flex flex-col overflow-hidden rounded-xl border border-border bg-card text-card-foreground shadow-2xl"
@@ -699,7 +734,7 @@ export function FloatingTerminal() {
           />
         </div>
 
-        <div className="relative min-h-0 flex-1 bg-card px-2 py-1.5">
+        <div className="relative min-h-0 flex-1 bg-card px-2 pb-1 pt-2">
           {state.tabs.map((tab) => (
             <TerminalView
               key={tab.terminalId}

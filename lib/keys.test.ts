@@ -4,7 +4,13 @@
 // that sends CSI in application cursor mode does nothing in vim, and an
 // off-by-one control code sends the wrong signal to the foreground process.
 import { describe, expect, it } from "vitest";
-import { arrowSequence, controlCode, TOOLBAR_KEYS } from "./keys";
+import {
+  arrowSequence,
+  controlCode,
+  isTabCycleKey,
+  tabCycleDirection,
+  TOOLBAR_KEYS,
+} from "./keys";
 
 describe("controlCode", () => {
   it("maps letters to their C0 control code", () => {
@@ -72,5 +78,39 @@ describe("TOOLBAR_KEYS", () => {
       "tab",
       "ctrl",
     ]);
+  });
+});
+
+describe("isTabCycleKey", () => {
+  const chord = (over: Partial<Parameters<typeof isTabCycleKey>[0]>) => ({
+    key: "]",
+    code: "BracketRight",
+    metaKey: true,
+    ctrlKey: false,
+    shiftKey: true,
+    altKey: false,
+    ...over,
+  });
+
+  it("accepts Cmd+Shift+] and Ctrl+Shift+[", () => {
+    expect(isTabCycleKey(chord({}))).toBe(true);
+    expect(
+      isTabCycleKey(chord({ metaKey: false, ctrlKey: true, key: "{", code: "BracketLeft" })),
+    ).toBe(true);
+  });
+
+  it("needs both a primary modifier and Shift, and no Alt", () => {
+    expect(isTabCycleKey(chord({ shiftKey: false }))).toBe(false);
+    expect(isTabCycleKey(chord({ metaKey: false }))).toBe(false);
+    expect(isTabCycleKey(chord({ altKey: true }))).toBe(false);
+    expect(isTabCycleKey(chord({ key: "p", code: "KeyP" }))).toBe(false);
+  });
+
+  it("reads the direction from either the key or the physical code", () => {
+    expect(tabCycleDirection({ key: "}", code: "BracketRight" })).toBe(1);
+    expect(tabCycleDirection({ key: "{", code: "BracketLeft" })).toBe(-1);
+    // A non-US layout where Shift+bracket is some other character.
+    expect(tabCycleDirection({ key: "ü", code: "BracketLeft" })).toBe(-1);
+    expect(tabCycleDirection({ key: "a", code: "KeyA" })).toBeNull();
   });
 });

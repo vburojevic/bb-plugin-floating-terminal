@@ -5,7 +5,7 @@
 // accessibility violation; Enter/Space activation is wired by hand instead.
 // Everything interactive carries data-no-drag; the bar itself is the window's
 // drag handle.
-import { useState, type KeyboardEvent } from "react";
+import { useState, type KeyboardEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -50,6 +50,15 @@ function statusDotClass(tab: TabState): string | null {
     default:
       return null;
   }
+}
+
+/** A key combination inside a tooltip, set apart from the words around it. */
+function Shortcut({ children }: { children: ReactNode }) {
+  return (
+    <kbd className="ml-1.5 rounded border border-border/60 bg-muted/60 px-1 py-px font-mono text-[10px] text-muted-foreground">
+      {children}
+    </kbd>
+  );
 }
 
 export function NewTabMenu({
@@ -151,7 +160,9 @@ function TabItem({
               onClose();
             }}
             className={cn(
-              "grid size-3.5 shrink-0 place-items-center rounded-sm text-muted-foreground transition-opacity",
+              // A 14px target is a miss half the time; 16px with the same
+              // 12px glyph reads identically and lands.
+              "-mr-0.5 grid size-4 shrink-0 place-items-center rounded-sm text-muted-foreground transition-opacity",
               "hover:bg-state-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
               active ? "opacity-100" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
             )}
@@ -226,22 +237,27 @@ export function TabBar({
         </div>
       )}
 
-      <NewTabMenu
-        scopes={scopes}
-        recentScopeKeys={recentScopeKeys}
-        showHosts={showHosts}
-        onNewTab={onNewTab}
-      >
-        <Button
-          variant="ghost"
-          size="icon"
-          data-no-drag=""
-          className="size-6 shrink-0 text-muted-foreground"
-          aria-label="New shell"
+      <Tooltip>
+        <NewTabMenu
+          scopes={scopes}
+          recentScopeKeys={recentScopeKeys}
+          showHosts={showHosts}
+          onNewTab={onNewTab}
         >
-          <Icon name="Plus" aria-hidden="true" />
-        </Button>
-      </NewTabMenu>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              data-no-drag=""
+              className="size-6 shrink-0 text-muted-foreground"
+              aria-label="New shell"
+            >
+              <Icon name="Plus" aria-hidden="true" />
+            </Button>
+          </TooltipTrigger>
+        </NewTabMenu>
+        <TooltipContent>New shell</TooltipContent>
+      </Tooltip>
 
       {/* Everything left of here scrolls or wraps; this is the guaranteed
           drag surface. */}
@@ -286,7 +302,12 @@ export function TabBar({
               <Icon name="ArrowReloadHorizontal" aria-hidden="true" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Restart shell</TooltipContent>
+          <TooltipContent>
+            Restart shell
+            <span className="block text-muted-foreground">
+              Fresh shell, same directory
+            </span>
+          </TooltipContent>
         </Tooltip>
       )}
 
@@ -305,10 +326,8 @@ export function TabBar({
           </Button>
         </TooltipTrigger>
         <TooltipContent>
-          Hide terminal{" "}
-          <kbd className="ml-1 font-mono text-[10px] text-muted-foreground">
-            Ctrl+`
-          </kbd>
+          Hide terminal
+          <Shortcut>Ctrl+`</Shortcut>
         </TooltipContent>
       </Tooltip>
     </div>

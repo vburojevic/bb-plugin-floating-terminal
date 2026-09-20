@@ -22,7 +22,7 @@ import {
   encodeInputChunks,
   normalizeTerminalTitle,
 } from "./terminal-io";
-import { arrowSequence, controlCode } from "./keys";
+import { arrowSequence, controlCode, isTabCycleKey } from "./keys";
 import { consumeScrollPixels } from "./scroll";
 import { resolveMonoFont, resolveTerminalTheme } from "./theme";
 
@@ -215,6 +215,10 @@ export class TerminalPump {
         this.options.onToggleRequested();
         return false;
       }
+      // Cmd/Ctrl+Shift+[ and ] walk the tab strip, the way every browser and
+      // editor does. Handed up untouched: the window owns the tab order, and
+      // xterm must not turn Ctrl+Shift+] into a control byte on the way.
+      if (isTabCycleKey(event)) return false;
       // The browser's find is useless inside a canvas; reclaim it for the
       // scrollback, the way every terminal-in-a-page does.
       if ((event.metaKey || event.ctrlKey) && event.key === "f") {
