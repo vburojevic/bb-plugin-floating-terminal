@@ -135,10 +135,14 @@
  * minimum does the strip scroll — horizontally, without a scrollbar. It must
  * clip: an overflowing strip painted its last tab over the + button on a
  * narrow phone, and the close button took the tap.
+ *
+ * A scroller clips at its padding edge, so the vertical padding is what gives
+ * the active tab's drop shadow somewhere to land. With none, the box was
+ * exactly one tab tall and the shadow was cut off along its top and bottom.
  */
 .bb-ft-window .bb-ft-tablist {
   gap: 2px;
-  padding: 0 1px;
+  padding: 4px 2px;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
@@ -191,12 +195,17 @@
   color: var(--foreground);
 }
 
+/*
+ * The hairline is inset, not an outer ring: drawn outside the tab it fell
+ * outside the scrolling strip and was clipped to its left and right sides —
+ * two stray vertical lines bracketing the tab instead of an outline.
+ */
 .bb-ft-window .bb-ft-tab[data-active] {
   background: var(--card);
   color: var(--foreground);
   box-shadow:
-    0 0 0 1px color-mix(in oklab, var(--foreground) 11%, transparent),
-    0 1px 2px rgb(0 0 0 / 0.12);
+    inset 0 0 0 1px color-mix(in oklab, var(--foreground) 10%, transparent),
+    0 1px 2px rgb(0 0 0 / 0.14);
 }
 
 .bb-ft-window .bb-ft-tab:focus-visible {
