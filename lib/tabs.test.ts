@@ -7,6 +7,7 @@
 import { describe, expect, it } from "vitest";
 import {
   emptyTabs,
+  scopeKind,
   tabName,
   tabsReducer,
   type ServerTab,
@@ -18,7 +19,7 @@ import {
 function serverTab(id: string, overrides: Partial<ServerTab> = {}): ServerTab {
   return {
     terminalId: id,
-    scopeKey: `scope:${id}`,
+    scopeKey: `project:${id}`,
     label: id,
     hostName: "mac",
     cwd: `/home/${id}`,
@@ -175,6 +176,8 @@ describe("shell titles", () => {
       }),
       status: "live",
       statusDetail: null,
+      customName: null,
+      activity: "none",
     };
 
     expect(tabName(tab, true)).toBe("m1 · scw-mini");
@@ -236,5 +239,99 @@ describe("shell titles", () => {
       },
     });
     expect(tabName(state.tabs[0]!)).toBe("Acme");
+  });
+});
+
+describe("custom names", () => {
+  it("wins over the shell's title and the directory", () => {
+    const state = tabsReducer(emptyTabs, {
+      type: "synced",
+      snapshot: {
+        revision: 1,
+        tabs: [serverTab("a", { shellTitle: "vim", customName: "api server" })],
+        activeTabId: "a",
+      },
+    });
+    expect(tabName(state.tabs[0]!)).toBe("api server");
+  });
+
+  it("flows a rename onto a tab the client already knows", () => {
+    const state = synced(emptyTabs, 1, ["a"]);
+    const next = tabsReducer(state, {
+      type: "synced",
+      snapshot: {
+        revision: 2,
+        tabs: [serverTab("a", { customName: "logs" })],
+        activeTabId: "a",
+      },
+    });
+    expect(next.tabs[0]!.customName).toBe("logs");
+  });
+});
+
+describe("activity", () => {
+  const two = () => synced(emptyTabs, 1, ["a", "b"], "a");
+
+  it("marks a background tab and clears it once the tab is shown", () => {
+    let state = tabsReducer(two(), { type: "activity", terminalId: "b", activity: "output" });
+    expect(state.tabs[1]!.activity).toBe("output");
+    state = tabsReducer(state, { type: "activated", terminalId: "b" });
+    expect(state.tabs[1]!.activity).toBe("none");
+  });
+
+  it("never badges the tab you are looking at", () => {
+    const state = two();
+    expect(
+      tabsReducer(state, { type: "activity", terminalId: "a", activity: "bell" }),
+    ).toBe(state);
+  });
+
+  it("keeps a bell until it is seen, even as more output arrives", () => {
+    let state = tabsReducer(two(), { type: "activity", terminalId: "b", activity: "bell" });
+    state = tabsReducer(state, { type: "activity", terminalId: "b", activity: "output" });
+    expect(state.tabs[1]!.activity).toBe("bell");
+  });
+
+  it("survives a snapshot that only renames", () => {
+    let state = tabsReducer(two(), { type: "activity", terminalId: "b", activity: "output" });
+    state = tabsReducer(state, {
+      type: "synced",
+      snapshot: {
+        revision: 2,
+        tabs: [serverTab("a"), serverTab("b", { shellTitle: "make" })],
+        activeTabId: "a",
+      },
+    });
+    expect(state.tabs[1]!.activity).toBe("output");
+  });
+});
+
+describe("moved", () => {
+  it("reorders optimistically and clamps the target", () => {
+    const state = synced(emptyTabs, 1, ["a", "b", "c"]);
+    expect(ids(tabsReducer(state, { type: "moved", terminalId: "a", toIndex: 2 }))).toEqual([
+      "b",
+      "c",
+      "a",
+    ]);
+    expect(ids(tabsReducer(state, { type: "moved", terminalId: "c", toIndex: -4 }))).toEqual([
+      "c",
+      "a",
+      "b",
+    ]);
+  });
+
+  it("is a no-op for an unknown tab or the same slot", () => {
+    const state = synced(emptyTabs, 1, ["a", "b"]);
+    expect(tabsReducer(state, { type: "moved", terminalId: "z", toIndex: 0 })).toBe(state);
+    expect(tabsReducer(state, { type: "moved", terminalId: "a", toIndex: 0 })).toBe(state);
+  });
+});
+
+describe("scopeKind", () => {
+  it("reads where a shell started from its scope key", () => {
+    expect(scopeKind("project:proj_1")).toBe("project");
+    expect(scopeKind("env:env_1")).toBe("worktree");
+    expect(scopeKind("home:host_1")).toBe("home");
   });
 });

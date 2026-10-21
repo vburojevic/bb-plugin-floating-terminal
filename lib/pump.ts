@@ -8,6 +8,10 @@
 // One pump per tab, owned by a TerminalView effect. The pump knows nothing
 // about tabs or windows; it reports status upward and asks for a restart when
 // the user presses Enter at a dead prompt.
+//
+// Three modes: `active` (the tab on screen) polls fast, `background` (another
+// tab in an open window) polls slowly so the strip can say "this one printed
+// something", and `paused` (the window is hidden) does not poll at all.
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
@@ -22,7 +26,7 @@ import {
   encodeInputChunks,
   normalizeTerminalTitle,
 } from "./terminal-io";
-import { arrowSequence, controlCode, isTabCycleKey } from "./keys";
+import { arrowSequence, controlCode, isTabCycleKey, windowChord } from "./keys";
 import { consumeScrollPixels } from "./scroll";
 import { resolveMonoFont, resolveTerminalTheme } from "./theme";
 
@@ -31,6 +35,16 @@ type Rpc = PluginRpcClient<typeof rpcContract>;
 /** Poll cadence, in ms: snappy under load, cheap when idle. */
 const FAST_INTERVAL = 40;
 const SLOW_INTERVAL = 320;
+/** A tab you are not looking at only has to notice that something happened. */
+const BACKGROUND_INTERVAL = 2000;
+/**
+ * Output in the first moments after a tab goes to the background is almost
+ * always the echo of leaving it — a prompt redrawn for the resize, the tail of
+ * the command you just watched — not news worth a dot.
+ */
+const BACKGROUND_GRACE_MS = 1500;
+/** Selection settles before the window offers to do something with it. */
+const SELECTION_SETTLE_MS = 160;
 /** Coalesce burst keystrokes and pastes into one request. */
 const INPUT_FLUSH_MS = 4;
 const RESIZE_DEBOUNCE_MS = 90;
@@ -53,6 +67,28 @@ const FLING_MAX_PX_PER_FRAME = 90;
 /** Fallback row height, for the tick before the renderer has measured one. */
 const FALLBACK_CELL_PX = 17;
 
+export type PumpMode = "active" | "background" | "paused";
+
+let webgl2: boolean | null = null;
+
+/** Asked once per page, and the probe context released straight away. */
+function webgl2Available(): boolean {
+  if (webgl2 !== null) return webgl2;
+  try {
+    const gl = document.createElement("canvas").getContext("webgl2");
+    webgl2 = gl !== null;
+    gl?.getExtension("WEBGL_lose_context")?.loseContext();
+  } catch {
+    webgl2 = false;
+  }
+  return webgl2;
+}
+
+export interface FindOptions {
+  caseSensitive?: boolean;
+  regex?: boolean;
+}
+
 export interface PumpOptions {
   container: HTMLElement;
   rpc: Rpc;
@@ -63,14 +99,30 @@ export interface PumpOptions {
   onRequestRestart: () => void;
   /** Fired for shortcuts xterm must not swallow (the global toggle). */
   onToggleRequested: () => void;
+  /** Ctrl+Shift+` inside the terminal: open a shell where the person is. */
+  onNewHereRequested?: () => void;
   /** A meaningful OSC title the shell set, already normalised. Null clears it. */
   onTitle?: (title: string | null) => void;
   /** The armed-Ctrl latch changed, so the bar can show it. */
   onCtrlArmed?: (armed: boolean) => void;
   /** Cmd/Ctrl+F landed in the terminal; the window should open its find bar. */
   onFindRequested?: () => void;
-  /** Whether the view sits at the newest output. Drives the jump-to-latest pill. */
-  onScrollState?: (atBottom: boolean) => void;
+  /**
+   * Whether the view sits at the newest output, and whether output has landed
+   * below it since it was parked. Drives the jump-to-latest pill.
+   */
+  onScrollState?: (atBottom: boolean, newOutput: boolean) => void;
+  /** A background tab printed something, or any tab rang the bell. */
+  onActivity?: (activity: "output" | "bell") => void;
+  /** The selection settled; empty once it is cleared. */
+  onSelection?: (text: string) => void;
+  /**
+   * A right-click with a mouse, at viewport coordinates. Returns whether the
+   * window showed a menu; when it did not, the platform's own one is left be.
+   */
+  onContextMenu?: (x: number, y: number) => boolean;
+  /** Clipboard writer; bb's own when the host offers it. */
+  copyText?: (text: string) => void;
   /** Match counts from an active search: null when the search is cleared. */
   onSearchResults?: (results: { index: number; count: number } | null) => void;
 }
@@ -96,7 +148,12 @@ export class TerminalPump {
   private outbox: string[] = [];
   private writeChain: Promise<unknown> = Promise.resolve();
   private status: TabStatus = "connecting";
-  private visible = false;
+  private mode: PumpMode = "paused";
+  /** When the tab last went to the background; see BACKGROUND_GRACE_MS. */
+  private backgroundSince = 0;
+  private selectionTimer: number | null = null;
+  /** Output landed below a parked viewport since it was parked. */
+  private newOutput = false;
   private started = false;
   private disposed = false;
   private resizeObserver: ResizeObserver | null = null;
@@ -127,6 +184,7 @@ export class TerminalPump {
    */
   private searchAddon: SearchAddon | null = null;
   private lastAtBottom: boolean | null = null;
+  private lastNewOutput = false;
 
   constructor(options: PumpOptions) {
     this.options = options;
@@ -183,7 +241,28 @@ export class TerminalPump {
     // onWriteParsed when new output lands (which moves the bottom out from
     // under a parked viewport).
     this.terminal.onScroll(() => this.reportScrollState());
-    this.terminal.onWriteParsed(() => this.reportScrollState());
+    this.terminal.onWriteParsed(() => {
+      const buffer = this.terminal.buffer.active;
+      if (buffer.viewportY < buffer.baseY && this.replayWrites === 0) {
+        this.newOutput = true;
+      }
+      this.reportScrollState();
+    });
+
+    this.terminal.onBell(() => {
+      if (this.replayWrites > 0 || this.disposed) return;
+      this.options.onActivity?.("bell");
+    });
+
+    this.terminal.onSelectionChange(() => {
+      if (this.selectionTimer !== null) window.clearTimeout(this.selectionTimer);
+      this.selectionTimer = window.setTimeout(() => {
+        this.selectionTimer = null;
+        if (!this.disposed) this.options.onSelection?.(this.terminal.getSelection());
+      }, SELECTION_SETTLE_MS);
+    });
+
+    options.container.addEventListener("contextmenu", this.onContextMenu);
 
     this.terminal.onTitleChange((title) => {
       if (this.replayWrites > 0 || this.disposed) return;
@@ -211,8 +290,13 @@ export class TerminalPump {
           return false;
         }
       }
-      if (event.ctrlKey && event.key === "`") {
+      const chord = windowChord(event);
+      if (chord === "toggle") {
         this.options.onToggleRequested();
+        return false;
+      }
+      if (chord === "new-here") {
+        this.options.onNewHereRequested?.();
         return false;
       }
       // Cmd/Ctrl+Shift+[ and ] walk the tab strip, the way every browser and
@@ -221,20 +305,22 @@ export class TerminalPump {
       if (isTabCycleKey(event)) return false;
       // The browser's find is useless inside a canvas; reclaim it for the
       // scrollback, the way every terminal-in-a-page does.
-      if ((event.metaKey || event.ctrlKey) && event.key === "f") {
+      // Lower-cased: with Caps Lock on, or Shift held, the key reports "F".
+      const key = event.key.toLowerCase();
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && key === "f") {
         this.options.onFindRequested?.();
         return false;
       }
       // Cmd/Ctrl+C must stay SIGINT unless there is something to copy.
       if (
         (event.metaKey || event.ctrlKey) &&
-        event.key === "c" &&
+        key === "c" &&
         this.terminal.hasSelection()
       ) {
-        void navigator.clipboard?.writeText(this.terminal.getSelection());
+        this.copy(this.terminal.getSelection());
         return false;
       }
-      if (event.metaKey && event.key === "k") {
+      if (event.metaKey && key === "k") {
         this.terminal.clear();
         return false;
       }
@@ -291,9 +377,88 @@ export class TerminalPump {
     // The alternate buffer has no scrollback, so it always reads as bottom —
     // which is right: the pill would be noise over vim or less.
     const atBottom = buffer.viewportY >= buffer.baseY;
-    if (atBottom === this.lastAtBottom) return;
+    if (atBottom) this.newOutput = false;
+    if (atBottom === this.lastAtBottom && this.newOutput === this.lastNewOutput) {
+      return;
+    }
     this.lastAtBottom = atBottom;
-    this.options.onScrollState?.(atBottom);
+    this.lastNewOutput = this.newOutput;
+    this.options.onScrollState?.(atBottom, this.newOutput);
+  }
+
+  private readonly onContextMenu = (event: MouseEvent): void => {
+    // Touch long-presses belong to the platform's own selection handles.
+    if (this.disposed || this.options.onContextMenu === undefined) return;
+    if ((event as PointerEvent).pointerType === "touch") return;
+    if (this.options.onContextMenu(event.clientX, event.clientY)) {
+      event.preventDefault();
+    }
+  };
+
+  private copy(text: string): void {
+    if (text === "") return;
+    if (this.options.copyText !== undefined) this.options.copyText(text);
+    else void navigator.clipboard?.writeText(text);
+  }
+
+  // ------------------------------------------------------------- clipboard
+
+  hasSelection(): boolean {
+    return this.terminal.hasSelection();
+  }
+
+  getSelection(): string {
+    return this.terminal.getSelection();
+  }
+
+  clearSelection(): void {
+    this.terminal.clearSelection();
+  }
+
+  selectAll(): void {
+    this.terminal.selectAll();
+  }
+
+  copySelection(): boolean {
+    const text = this.terminal.getSelection();
+    this.copy(text);
+    return text !== "";
+  }
+
+  /**
+   * Everything in the scrollback as plain text: wrapped rows rejoined, trailing
+   * blank rows dropped. What "Copy all output" and "Send to agent" use.
+   */
+  allText(): string {
+    const buffer = this.terminal.buffer.active;
+    const lines: string[] = [];
+    for (let row = 0; row < buffer.length; row += 1) {
+      const line = buffer.getLine(row);
+      if (line === undefined) continue;
+      const text = line.translateToString(true);
+      if (line.isWrapped && lines.length > 0) lines[lines.length - 1] += text;
+      else lines.push(text);
+    }
+    while (lines.length > 0 && lines[lines.length - 1]!.trim() === "") lines.pop();
+    return lines.join("\n");
+  }
+
+  /**
+   * Type text in as one paste. xterm wraps it in bracketed-paste markers when
+   * the shell asked for them, which is what keeps a multi-line command from
+   * running line by line as it lands.
+   */
+  paste(text: string): void {
+    this.terminal.paste(text);
+  }
+
+  /** Whether the program at the prompt asked for bracketed paste. */
+  bracketedPaste(): boolean {
+    return this.terminal.modes.bracketedPasteMode;
+  }
+
+  clear(): void {
+    this.terminal.clear();
   }
 
   scrollToBottom(): void {
@@ -327,14 +492,26 @@ export class TerminalPump {
    * `incremental` keeps the active match anchored while the query grows, which
    * is what makes find-as-you-type read as refinement instead of jumping.
    */
-  findNext(query: string, incremental = false): void {
+  findNext(query: string, options: FindOptions = {}, incremental = false): void {
     if (this.searchAddon === null || query === "") return;
-    this.searchAddon.findNext(query, { ...this.searchOptions(), incremental });
+    try {
+      this.searchAddon.findNext(query, {
+        ...this.searchOptions(),
+        ...options,
+        incremental,
+      });
+    } catch {
+      // A regex still being typed (`foo(`) is not an error worth a toast.
+    }
   }
 
-  findPrevious(query: string): void {
+  findPrevious(query: string, options: FindOptions = {}): void {
     if (this.searchAddon === null || query === "") return;
-    this.searchAddon.findPrevious(query, this.searchOptions());
+    try {
+      this.searchAddon.findPrevious(query, { ...this.searchOptions(), ...options });
+    } catch {
+      // As above.
+    }
   }
 
   clearSearch(): void {
@@ -485,6 +662,9 @@ export class TerminalPump {
    * leaving a dead canvas. Mirrors what bb's own terminal does.
    */
   private loadWebglRenderer(): void {
+    // Without WebGL2 the addon fails inside open(), outside this try, as an
+    // uncaught error; the DOM renderer is the right answer anyway.
+    if (!webgl2Available()) return;
     let addon: WebglAddon | null = null;
     let contextLoss: { dispose: () => void } | null = null;
     try {
@@ -615,7 +795,8 @@ export class TerminalPump {
 
   private schedule(delay: number): void {
     this.stopPolling();
-    if (this.disposed || !this.visible || !this.started) return;
+    if (this.disposed || this.mode === "paused" || !this.started) return;
+    if (this.mode === "background") delay = Math.max(delay, BACKGROUND_INTERVAL);
     // A read already in flight will schedule the next one when it lands;
     // arming another here is what duplicates output.
     if (this.reading) return;
@@ -627,7 +808,7 @@ export class TerminalPump {
   // and skip the follow-up, leaving the loop dead.
   private async poll(): Promise<void> {
     this.pollTimer = null;
-    if (this.disposed || !this.visible || this.reading) return;
+    if (this.disposed || this.mode === "paused" || this.reading) return;
     this.reading = true;
     let next: "schedule" | "replay" | "stop" = "schedule";
 
@@ -652,6 +833,12 @@ export class TerminalPump {
         if (result.chunks.length > 0) {
           this.interval = FAST_INTERVAL;
           if (this.status !== "live") this.setStatus("live");
+          if (
+            this.mode === "background" &&
+            Date.now() - this.backgroundSince > BACKGROUND_GRACE_MS
+          ) {
+            this.options.onActivity?.("output");
+          }
         } else if (
           result.status !== null &&
           result.status !== "running" &&
@@ -743,14 +930,23 @@ export class TerminalPump {
     void this.replay();
   }
 
-  /** Visible drives polling: hidden tabs cost nothing. */
-  setVisible(visible: boolean): void {
-    if (this.visible === visible) return;
-    this.visible = visible;
-    if (visible) {
+  /**
+   * The mode drives polling: the tab on screen is fast, a tab behind it in an
+   * open window is slow, and nothing polls while the window is hidden.
+   */
+  setMode(mode: PumpMode): void {
+    if (this.mode === mode) return;
+    const previous = this.mode;
+    this.mode = mode;
+    if (mode === "active") {
       this.fit();
       this.interval = FAST_INTERVAL;
       this.schedule(0);
+    } else if (mode === "background") {
+      this.backgroundSince = Date.now();
+      // Leaving the screen is not news; arriving in the background from a
+      // hidden window can start at the slow cadence straight away.
+      this.schedule(previous === "paused" ? 0 : BACKGROUND_INTERVAL);
     } else {
       this.stopPolling();
     }
@@ -794,7 +990,9 @@ export class TerminalPump {
   dispose(): void {
     this.disposed = true;
     this.stopFling();
+    if (this.selectionTimer !== null) window.clearTimeout(this.selectionTimer);
     const el = this.options.container;
+    el.removeEventListener("contextmenu", this.onContextMenu);
     el.removeEventListener("touchstart", this.onTouchStart);
     el.removeEventListener("touchmove", this.onTouchMove);
     el.removeEventListener("touchend", this.onTouchEnd);

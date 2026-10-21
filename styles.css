@@ -2,9 +2,19 @@
 
 /*
  * Everything Tailwind utilities cannot express for the floating window.
- * All rules are scoped under .bb-ft-window so nothing here can reach the rest
- * of the bb app — including the xterm.css imported alongside it.
+ *
+ * Rules are scoped under .bb-ft-window so nothing here can reach the rest of
+ * the bb app — including the xterm.css imported alongside it. The handful of
+ * classes used inside portaled menus and tooltips (which render outside the
+ * window) carry the bb-ft- prefix instead, which is just as private.
+ *
+ * Sizes live here rather than as utility classes for one more reason: this
+ * plugin ships its own Tailwind build, and inside the host page its utility
+ * layer loses to bb's app CSS for `max-*` and the text sizes. Everything
+ * scoped under .bb-ft-window does apply.
  */
+
+/* ------------------------------------------------------------------ window */
 
 /*
  * Show/hide is one authored motion moment: the window grows out of its
@@ -16,6 +26,18 @@
  */
 .bb-ft-window {
   transform-origin: 0% 100%;
+  /* Above bb's chrome; see the stacking note at the end of this file. */
+  z-index: 55;
+  /*
+   * bb's desktop app marks its title bar as a native window-drag region, and
+   * the OS resolves those regions from the page's CSS boxes, not from what is
+   * painted on top. Without this, every part of the window that overlapped
+   * bb's title bar — the whole tab strip once the window was maximized or
+   * dragged to the top — moved the bb window instead of taking the click.
+   * bb's own overlays opt out the same way.
+   */
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 
 .bb-ft-window[data-state="closed"] {
@@ -29,20 +51,288 @@
   visibility: hidden;
 }
 
+/*
+ * `none`, not an identity transform. A transform that stays on after the
+ * entrance keeps the window on its own compositor layer for as long as it is
+ * open; at a fractional device pixel ratio (any bb zoom level, most external
+ * displays) that layer's bottom edge lands between device pixels and the
+ * seam shows as a dark line along the bottom of the window. It also kept
+ * every glyph a hair softer than bb's own terminal.
+ */
 .bb-ft-window[data-state="open"] {
   opacity: 1;
-  transform: translate3d(0, 0, 0) scale(1);
+  transform: none;
   transition:
     opacity 190ms cubic-bezier(0.16, 1, 0.3, 1),
     transform 190ms cubic-bezier(0.16, 1, 0.3, 1);
   visibility: visible;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .bb-ft-window[data-state="closed"],
-  .bb-ft-window[data-state="open"] {
-    transition: none;
+/* A drag or resize in flight: nothing animates, nothing gets selected. */
+.bb-ft-window[data-gesture] {
+  transition: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.bb-ft-window[data-gesture="drag"],
+.bb-ft-window[data-gesture="drag"] * {
+  cursor: grabbing !important;
+}
+
+/*
+ * The visible window. Clipped and rounded here rather than on the positioned
+ * box, so the resize handles below can straddle the edge without sitting on
+ * top of the title bar.
+ */
+.bb-ft-window .bb-ft-surface {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+  box-shadow:
+    0 0 0 0.5px color-mix(in oklab, black 22%, transparent),
+    0 2px 6px -1px rgb(0 0 0 / 0.14),
+    0 22px 56px -14px rgb(0 0 0 / 0.42);
+}
+
+.bb-ft-window[data-gesture] .bb-ft-surface {
+  box-shadow:
+    0 0 0 0.5px color-mix(in oklab, black 22%, transparent),
+    0 4px 10px -2px rgb(0 0 0 / 0.18),
+    0 30px 70px -16px rgb(0 0 0 / 0.5);
+}
+
+/* --------------------------------------------------------------- title bar */
+
+.bb-ft-window .bb-ft-tabbar {
+  height: 40px;
+  gap: 2px;
+  padding: 0 6px 0 4px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 85%, transparent);
+  background: color-mix(in oklab, var(--foreground) 3.5%, var(--card));
+}
+
+.bb-ft-window[data-layout="window"]:not([data-maximized]) [data-bb-ft-drag],
+.bb-ft-window[data-layout="window"]:not([data-maximized]) [data-bb-ft-grip] {
+  cursor: grab;
+}
+
+.bb-ft-window [data-bb-ft-grip] {
+  width: 14px;
+  justify-content: center;
+  color: color-mix(in oklab, var(--muted-foreground) 55%, transparent);
+}
+
+.bb-ft-window .bb-ft-title {
+  padding: 0 6px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/*
+ * Tabs shrink to share the strip first, and only once they are all at their
+ * minimum does the strip scroll — horizontally, without a scrollbar. It must
+ * clip: an overflowing strip painted its last tab over the + button on a
+ * narrow phone, and the close button took the tap.
+ */
+.bb-ft-window .bb-ft-tablist {
+  gap: 2px;
+  padding: 0 1px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
+}
+
+.bb-ft-window .bb-ft-tablist::-webkit-scrollbar {
+  display: none;
+}
+
+/* Title-bar buttons: a 28px chip, centred in the 40px bar. */
+.bb-ft-window .bb-ft-bar-button {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: 7px;
+  color: var(--muted-foreground);
+}
+
+.bb-ft-window .bb-ft-bar-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* ------------------------------------------------------------------- tabs */
+
+.bb-ft-window .bb-ft-tab {
+  position: relative;
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  min-width: 72px;
+  max-width: 11.5rem;
+  padding: 0 4px 0 8px;
+  border-radius: 7px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1;
+  cursor: default;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.bb-ft-window .bb-ft-tab:hover {
+  background: color-mix(in oklab, var(--foreground) 6%, transparent);
+  color: var(--foreground);
+}
+
+.bb-ft-window .bb-ft-tab[data-active] {
+  background: var(--card);
+  color: var(--foreground);
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--foreground) 11%, transparent),
+    0 1px 2px rgb(0 0 0 / 0.12);
+}
+
+.bb-ft-window .bb-ft-tab:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -1px;
+}
+
+.bb-ft-window .bb-ft-tab[data-dragging] {
+  opacity: 0.55;
+}
+
+.bb-ft-window .bb-ft-tab-icon {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.bb-ft-window .bb-ft-tab[data-active] .bb-ft-tab-icon {
+  opacity: 0.9;
+}
+
+/* One 18px slot at the trailing edge: the status/activity mark, or the close
+   button on hover. They share it so a tab never changes width under you. */
+.bb-ft-window .bb-ft-tab-end {
+  position: relative;
+  display: grid;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  place-items: center;
+}
+
+.bb-ft-window .bb-ft-tab-close {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  color: var(--muted-foreground);
+  opacity: 0;
+  transition:
+    opacity 100ms ease,
+    background-color 100ms ease;
+}
+
+.bb-ft-window .bb-ft-tab-close:hover {
+  background: color-mix(in oklab, var(--foreground) 10%, transparent);
+  color: var(--foreground);
+}
+
+.bb-ft-window .bb-ft-tab-close:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+/* No mark: the active tab always shows its close button. With a mark, the
+   mark wins until the pointer arrives. */
+.bb-ft-window .bb-ft-tab[data-active] .bb-ft-tab-close:not([data-has-mark]),
+.bb-ft-window .bb-ft-tab:hover .bb-ft-tab-close {
+  opacity: 1;
+}
+
+.bb-ft-window .bb-ft-tab:hover .bb-ft-dot {
+  opacity: 0;
+}
+
+.bb-ft-window .bb-ft-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--foreground) 70%, transparent);
+  transition: opacity 100ms ease;
+}
+
+.bb-ft-window .bb-ft-dot-hollow {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px color-mix(in oklab, var(--muted-foreground) 80%, transparent);
+}
+
+.bb-ft-window .bb-ft-dot-error {
+  background: var(--destructive);
+}
+
+.bb-ft-window .bb-ft-dot-bell {
+  background: var(--primary);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary) 25%, transparent);
+}
+
+.bb-ft-window .bb-ft-dot-pulse {
+  background: var(--muted-foreground);
+  animation: bb-ft-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes bb-ft-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
   }
+  50% {
+    opacity: 1;
+  }
+}
+
+.bb-ft-window .bb-ft-rename {
+  min-width: 0;
+  flex: 1;
+  height: 20px;
+  margin: 0 -2px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 4px;
+  outline: 1.5px solid var(--ring);
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12px;
+}
+
+.bb-ft-window .bb-ft-drop-indicator {
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 0;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--primary);
+  pointer-events: none;
+}
+
+/* ------------------------------------------------------------------- body */
+
+.bb-ft-window .bb-ft-body {
+  padding: 8px 8px 4px;
+  background: var(--card);
 }
 
 /* Let the terminal own the full body box; FitAddon sizes rows/cols to it. */
@@ -52,28 +342,595 @@
 }
 
 /*
- * The black line along the bottom edge.
+ * The black lines.
  *
  * xterm 6 paints the theme background on its scrollable element, whose height
  * is rows x cell height — and the body box is almost never an exact multiple
  * of a cell. Underneath it, xterm.css still ships the legacy `.xterm-viewport`
  * at `inset: 0` with a hard-coded `background-color: #000`, so the sub-row
  * remainder at the bottom showed as a black strip in every theme but black.
- * Transparent lets the window's own surface through, which is what the theme
- * background was derived from in the first place.
+ * Transparent lets the body through, and the body is painted with the exact
+ * colour the terminal resolved (see `surface` in floating-terminal.tsx), so
+ * the remainder cannot differ from it by even a rounding step.
  */
 .bb-ft-window .xterm .xterm-viewport {
   background-color: transparent;
 }
 
-/* The tab strip scrolls horizontally without showing a scrollbar. */
-.bb-ft-window [role="tablist"] {
-  scrollbar-width: none;
+/*
+ * The other hard-coded black in xterm.css: the box that shows text while an
+ * input method composes it. It sits on the cursor row — the bottom row, once
+ * the screen has filled — and comes up for a dead key (´ ˇ ¨ on most European
+ * layouts), the macOS accent popover, dictation, and every word typed on an
+ * Android keyboard: a black bar along the bottom of the window that appeared
+ * and vanished as you typed.
+ */
+.bb-ft-window .xterm .composition-view {
+  background: color-mix(in oklab, var(--primary) 14%, var(--card));
+  color: var(--foreground);
+  box-shadow: inset 0 -1.5px 0 var(--primary);
 }
 
-.bb-ft-window [role="tablist"]::-webkit-scrollbar {
-  display: none;
+/* ------------------------------------------------------------------- find */
+
+.bb-ft-window .bb-ft-find {
+  height: 34px;
+  padding: 0 3px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: color-mix(in oklab, var(--popover, var(--card)) 96%, transparent);
+  box-shadow: 0 8px 24px -8px rgb(0 0 0 / 0.35);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
 }
+
+.bb-ft-window .bb-ft-find[data-missed] {
+  border-color: color-mix(in oklab, var(--destructive) 55%, var(--border));
+}
+
+.bb-ft-window .bb-ft-find-input {
+  width: 9.5rem;
+  font-size: 12px;
+}
+
+.bb-ft-window .bb-ft-find-count {
+  min-width: 3.25rem;
+  padding: 0 4px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.bb-ft-window .bb-ft-find[data-missed] .bb-ft-find-count {
+  color: var(--destructive);
+}
+
+.bb-ft-window .bb-ft-find-toggle {
+  height: 24px;
+  min-width: 26px;
+  padding: 0 5px;
+  border-radius: 6px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+}
+
+.bb-ft-window .bb-ft-find-toggle:hover {
+  background: color-mix(in oklab, var(--foreground) 7%, transparent);
+  color: var(--foreground);
+}
+
+.bb-ft-window .bb-ft-find-toggle-on {
+  background: color-mix(in oklab, var(--primary) 18%, transparent);
+  color: var(--foreground);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 45%, transparent);
+}
+
+.bb-ft-window .bb-ft-find-rule {
+  width: 1px;
+  height: 16px;
+  margin: 0 3px;
+  background: var(--border);
+}
+
+.bb-ft-window .bb-ft-find-button {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  color: var(--muted-foreground);
+}
+
+/* ------------------------------------------------------------------ pills */
+
+/*
+ * Over the terminal's bottom-right corner: jump to the newest output while
+ * parked in history, act on a selection, or say that a shell is starting.
+ * Right rather than centred, because the prompt — the one line you are
+ * always reading — runs from the left; clear of the scrollbar.
+ */
+.bb-ft-window .bb-ft-pills {
+  position: absolute;
+  right: 26px;
+  bottom: 12px;
+  z-index: 5;
+  display: flex;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.bb-ft-window .bb-ft-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--card) 92%, transparent);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  box-shadow: 0 6px 18px -6px rgb(0 0 0 / 0.35);
+  pointer-events: auto;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  animation: bb-ft-rise 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.bb-ft-window button.bb-ft-pill:hover {
+  background: color-mix(in oklab, var(--foreground) 6%, var(--card));
+}
+
+.bb-ft-window button.bb-ft-pill:active {
+  background: var(--state-active, var(--muted));
+}
+
+.bb-ft-window .bb-ft-pill[data-tone="accent"] {
+  border-color: transparent;
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.bb-ft-window button.bb-ft-pill[data-tone="accent"]:hover {
+  background: color-mix(in oklab, var(--primary) 88%, var(--foreground));
+}
+
+.bb-ft-window .bb-ft-pill-quiet {
+  color: var(--muted-foreground);
+  pointer-events: none;
+}
+
+@keyframes bb-ft-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+.bb-ft-window .bb-ft-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid color-mix(in oklab, var(--muted-foreground) 30%, transparent);
+  border-top-color: var(--foreground);
+  border-radius: 999px;
+  animation: bb-ft-spin 0.75s linear infinite;
+}
+
+.bb-ft-window .bb-ft-spinner-small {
+  width: 12px;
+  height: 12px;
+  border-width: 1.5px;
+}
+
+@keyframes bb-ft-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ------------------------------------------------------------ empty state */
+
+.bb-ft-window .bb-ft-empty-mark {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: color-mix(in oklab, var(--foreground) 4%, var(--card));
+  color: var(--muted-foreground);
+}
+
+.bb-ft-window .bb-ft-empty-picker {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--foreground) 2%, var(--card));
+}
+
+.bb-ft-window .bb-ft-hints {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px 14px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+/* The empty window gives the picker a whole pane; the vendored menu cap would
+   strand it at 300px in the middle of it. */
+.bb-ft-window [data-bb-ft-fill] {
+  max-height: none;
+}
+
+/*
+ * At sheet width the machine name is the least important thing in the row, but
+ * "Vedrans-MacBook-Pro" is 151px of a 313px row — enough to truncate every
+ * project to "bb-plugin-co…". Cap it below the same breakpoint the sheet uses;
+ * wider rows have the room and keep the full name.
+ */
+.bb-ft-window [data-bb-ft-host],
+[data-bb-portaled-overlay] [data-bb-ft-host] {
+  max-width: 8.5rem;
+}
+
+@media (width < 48rem) {
+  .bb-ft-window [data-bb-ft-host],
+  [data-bb-portaled-overlay] [data-bb-ft-host] {
+    max-width: 6rem;
+  }
+}
+
+/* ------------------------------------------- shared with portaled content */
+
+.bb-ft-kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  border: 1px solid color-mix(in oklab, currentColor 22%, transparent);
+  border-radius: 4px;
+  background: color-mix(in oklab, currentColor 8%, transparent);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.bb-ft-tooltip {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.bb-ft-chip {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in oklab, var(--primary) 14%, transparent);
+  color: var(--muted-foreground);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.bb-ft-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 4px 4px 8px;
+}
+
+.bb-ft-step {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--muted-foreground);
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+.bb-ft-step:hover:not(:disabled) {
+  background: var(--state-hover, color-mix(in oklab, var(--foreground) 7%, transparent));
+  color: var(--foreground);
+}
+
+.bb-ft-step:disabled {
+  opacity: 0.4;
+}
+
+.bb-ft-step-on {
+  background: color-mix(in oklab, var(--primary) 18%, transparent);
+  color: var(--foreground);
+}
+
+.bb-ft-step-value {
+  min-width: 30px;
+  height: 26px;
+  border-radius: 6px;
+  color: var(--foreground);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.bb-ft-step-value:hover {
+  background: var(--state-hover, color-mix(in oklab, var(--foreground) 7%, transparent));
+}
+
+/* A phone has no F2 and no ⌘; the hint is noise there. */
+@media (pointer: coarse) {
+  .bb-ft-shortcut-hint {
+    display: none;
+  }
+}
+
+.bb-ft-menu-foot {
+  padding: 6px 8px 4px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+/* -------------------------------------------------------- shortcut sheet */
+
+.bb-ft-window .bb-ft-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  background: color-mix(in oklab, var(--card) 55%, transparent);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+  animation: bb-ft-fade 140ms ease;
+}
+
+.bb-ft-window .bb-ft-panel {
+  width: min(100%, 26rem);
+  max-height: 100%;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--popover, var(--card));
+  box-shadow: 0 18px 48px -12px rgb(0 0 0 / 0.45);
+  animation: bb-ft-rise 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.bb-ft-window .bb-ft-shortcuts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 7px 14px;
+  margin: 0;
+  padding: 4px 16px 16px;
+  font-size: 12px;
+}
+
+.bb-ft-window .bb-ft-shortcuts dt {
+  color: var(--foreground);
+}
+
+.bb-ft-window .bb-ft-shortcuts dd {
+  margin: 0;
+  color: var(--muted-foreground);
+}
+
+@keyframes bb-ft-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+/* --------------------------------------------------------- resize handles */
+
+/*
+ * They straddle the window's edge — half outside, half inside — the way a
+ * desktop OS's do, so grabbing one never means reaching into the title bar.
+ * The top-right corner used to sit inside the window over the hide button.
+ */
+.bb-ft-window .bb-ft-edge {
+  position: absolute;
+  touch-action: none;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.bb-ft-window [data-bb-ft-edge="n"] {
+  top: -4px;
+  right: 10px;
+  left: 10px;
+  height: 7px;
+  cursor: ns-resize;
+}
+
+.bb-ft-window [data-bb-ft-edge="s"] {
+  right: 10px;
+  bottom: -4px;
+  left: 10px;
+  height: 8px;
+  cursor: ns-resize;
+}
+
+.bb-ft-window [data-bb-ft-edge="e"] {
+  top: 10px;
+  right: -4px;
+  bottom: 10px;
+  width: 8px;
+  cursor: ew-resize;
+}
+
+.bb-ft-window [data-bb-ft-edge="w"] {
+  top: 10px;
+  bottom: 10px;
+  left: -4px;
+  width: 8px;
+  cursor: ew-resize;
+}
+
+.bb-ft-window [data-bb-ft-edge="ne"],
+.bb-ft-window [data-bb-ft-edge="nw"],
+.bb-ft-window [data-bb-ft-edge="se"],
+.bb-ft-window [data-bb-ft-edge="sw"] {
+  width: 12px;
+  height: 12px;
+}
+
+.bb-ft-window [data-bb-ft-edge="ne"] {
+  top: -5px;
+  right: -5px;
+  cursor: nesw-resize;
+}
+
+.bb-ft-window [data-bb-ft-edge="nw"] {
+  top: -5px;
+  left: -5px;
+  cursor: nwse-resize;
+}
+
+.bb-ft-window [data-bb-ft-edge="se"] {
+  right: -5px;
+  bottom: -5px;
+  cursor: nwse-resize;
+}
+
+.bb-ft-window [data-bb-ft-edge="sw"] {
+  bottom: -5px;
+  left: -5px;
+  cursor: nesw-resize;
+}
+
+/* ------------------------------------------------------------ touch input */
+
+/*
+ * Taps on a touch screen. `manipulation` takes double-tap-to-zoom out of the
+ * gesture set: without it iOS held every tap on these controls back to see
+ * whether a second one followed, and a quick second tap — close two tabs, step
+ * the text size — zoomed the page instead of pressing anything.
+ */
+.bb-ft-window button,
+.bb-ft-window [role="tab"],
+.bb-ft-window [role="tablist"] {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+/*
+ * The window owns a drag that starts on its title bar. Left at the default,
+ * an iPad claimed that gesture for scrolling the page and the window never
+ * moved; the strip of tabs keeps sideways panning so it still scrolls.
+ */
+.bb-ft-window[data-layout="window"] [data-bb-ft-handle] {
+  touch-action: none;
+}
+
+.bb-ft-window[data-layout="window"] [data-bb-ft-handle] [role="tablist"] {
+  touch-action: pan-x;
+}
+
+/*
+ * The terminal owns vertical dragging on a touch screen.
+ *
+ * xterm 6 has no touch scrolling of its own, so lib/pump.ts translates a drag
+ * into scrollLines. For that to be reliable the browser must not claim the
+ * gesture first — with the default touch-action it starts panning and the
+ * touchmove handler never gets to preventDefault in time. Scoped to coarse
+ * pointers so a mouse and a trackpad keep every native behaviour.
+ */
+@media (pointer: coarse) {
+  .bb-ft-window .xterm {
+    touch-action: none;
+  }
+}
+
+/*
+ * Touch targets in the title bar.
+ *
+ * The desktop strip is dense — 28px tabs and buttons — which on a phone is
+ * under the ~40px a thumb hits reliably. On a coarse pointer the strip grows
+ * and every control in it grows with it, and a tab's close button is always
+ * visible: there is no hover to reveal it with.
+ */
+@media (pointer: coarse) {
+  .bb-ft-window .bb-ft-tabbar {
+    height: 50px;
+    gap: 4px;
+    padding: 0 6px;
+  }
+
+  .bb-ft-window .bb-ft-tab {
+    height: 38px;
+    min-width: 96px;
+    max-width: 12rem;
+    padding: 0 2px 0 11px;
+    border-radius: 10px;
+    font-size: 13px;
+  }
+
+  .bb-ft-window .bb-ft-tab-end {
+    width: 32px;
+    height: 32px;
+  }
+
+  .bb-ft-window .bb-ft-tab .bb-ft-tab-close {
+    opacity: 1;
+  }
+
+  .bb-ft-window .bb-ft-tab .bb-ft-dot {
+    display: none;
+  }
+
+  /* With the close button always up, a mark rides on the icon instead. */
+  .bb-ft-window .bb-ft-tab:has(.bb-ft-dot-bell) .bb-ft-tab-icon,
+  .bb-ft-window .bb-ft-tab:has(.bb-ft-dot-error) .bb-ft-tab-icon {
+    color: var(--primary);
+    opacity: 1;
+  }
+
+  .bb-ft-window .bb-ft-bar-button {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+  }
+
+  .bb-ft-window .bb-ft-bar-button svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .bb-ft-window .bb-ft-pill {
+    height: 40px;
+    padding: 0 16px 0 13px;
+    font-size: 13px;
+  }
+
+  .bb-ft-window .bb-ft-find {
+    height: 42px;
+  }
+
+  .bb-ft-window .bb-ft-find-button,
+  .bb-ft-window .bb-ft-find-toggle {
+    min-width: 34px;
+    height: 34px;
+  }
+
+  .bb-ft-window .bb-ft-find-input {
+    width: 7rem;
+    /* Under 16px, iOS zooms the page in on focus. */
+    font-size: 16px;
+  }
+
+  .bb-ft-step,
+  .bb-ft-step-value {
+    min-width: 36px;
+    height: 36px;
+  }
+}
+
+/* --------------------------------------------------------------- sheet */
 
 /*
  * Mobile: one sheet, inset on every side.
@@ -110,18 +967,39 @@
   transform-origin: 50% 100%;
 }
 
+.bb-ft-window[data-layout="sheet"] .bb-ft-surface {
+  border-radius: 16px;
+}
+
 .bb-ft-window[data-layout="sheet"][data-state="closed"] {
   transform: translate3d(0, 16px, 0) scale(0.985);
 }
 
 /* Nothing here is draggable, so the bar must not advertise that it is — no
    grab cursor, and no drag grip taking room a tab could use. */
-.bb-ft-window[data-layout="sheet"] [data-bb-ft-handle] {
-  cursor: default;
-}
-
 .bb-ft-window[data-layout="sheet"] [data-bb-ft-grip] {
   display: none;
+}
+
+/*
+ * Keyboard-aware height. visualViewport reports the part of the page the
+ * keyboard has not covered; without this the sheet keeps its full height and
+ * the prompt sits behind the keys. The offset matters too — iOS scrolls the
+ * layout viewport under the visual one, and a fixed element follows the layout
+ * viewport.
+ */
+.bb-ft-window[data-layout="sheet"] {
+  top: calc(var(--bb-ft-viewport-top, 0px) + var(--bb-ft-sheet-top));
+  height: calc(
+    var(--bb-ft-viewport-height, 100dvh) - var(--bb-ft-sheet-top) -
+      var(--bb-ft-sheet-bottom)
+  );
+}
+
+/* The home-indicator inset is already inside the keyboard; counting it twice
+   leaves a dead strip above the keys. */
+.bb-ft-window[data-layout="sheet"][data-keyboard="open"] {
+  --bb-ft-sheet-bottom: var(--bb-ft-sheet-gap);
 }
 
 /*
@@ -133,7 +1011,10 @@
 .bb-ft-backdrop {
   position: fixed;
   inset: 0;
+  z-index: 54;
   background: color-mix(in oklab, var(--background) 45%, transparent);
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 
 @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
@@ -159,50 +1040,13 @@
   visibility: visible;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .bb-ft-backdrop[data-state="closed"],
-  .bb-ft-backdrop[data-state="open"] {
-    transition: none;
-  }
-}
-
-/*
- * Two sizing rules that have to live here rather than as utility classes.
- *
- * This plugin ships its own Tailwind build, and inside the host page its
- * utility layer loses to bb's app CSS for `max-*` and the text sizes: on a
- * measured page `min-h-0` and the vendored `max-h-[300px]` both land, while
- * `max-h-none`, `max-h-full` and `max-w-24` all compute to `none`. Everything
- * scoped under .bb-ft-window does apply, so the two caps that matter are set
- * here where they are guaranteed to win.
- */
-
-/* The empty window gives the picker a whole pane; the vendored menu cap would
-   strand it at 300px in the middle of it. */
-.bb-ft-window [data-bb-ft-fill] {
-  max-height: none;
-}
-
-/*
- * At sheet width the machine name is the least important thing in the row, but
- * "Vedrans-MacBook-Pro" is 151px of a 313px row — enough to truncate every
- * project to "bb-plugin-co…". Cap it below the same breakpoint the sheet uses;
- * wider rows have the room and keep the full name.
- */
-@media (width < 48rem) {
-  .bb-ft-window [data-bb-ft-host] {
-    max-width: 6rem;
-  }
-}
-
 /*
  * The on-screen key bar.
  *
- * Geometry lives here rather than in utility classes for the reason above — and
- * because these are touch targets, where being silently ignored is the
- * difference between a usable terminal and a decorative one. 40px is the floor
- * Apple's HIG puts on a hit target; the bar scrolls horizontally rather than
- * wrapping, so the row height never changes under a thumb.
+ * These are touch targets, where being silently ignored is the difference
+ * between a usable terminal and a decorative one. 40px is the floor Apple's HIG
+ * puts on a hit target; the bar scrolls horizontally rather than wrapping, so
+ * the row height never changes under a thumb.
  */
 .bb-ft-window .bb-ft-keybar {
   overflow-x: auto;
@@ -253,132 +1097,32 @@
 }
 
 /*
- * Keyboard-aware height. visualViewport reports the part of the page the
- * keyboard has not covered; without this the sheet keeps its full height and
- * the prompt sits behind the keys. The offset matters too — iOS scrolls the
- * layout viewport under the visual one, and a fixed element follows the layout
- * viewport.
- */
-.bb-ft-window[data-layout="sheet"] {
-  top: calc(var(--bb-ft-viewport-top, 0px) + var(--bb-ft-sheet-top));
-  height: calc(
-    var(--bb-ft-viewport-height, 100dvh) - var(--bb-ft-sheet-top) -
-      var(--bb-ft-sheet-bottom)
-  );
-}
-
-/* The home-indicator inset is already inside the keyboard; counting it twice
-   leaves a dead strip above the keys. */
-.bb-ft-window[data-layout="sheet"][data-keyboard="open"] {
-  --bb-ft-sheet-bottom: var(--bb-ft-sheet-gap);
-}
-
-/*
- * Above bb's own chrome.
+ * Stacking, against bb's own layers.
  *
  * The window shipped at z-40, and bb's floating sidebar toggle lives in a fixed
  * z-50 layer — so on a phone, where the sheet starts 10px from the top-left
  * corner, that button sat on top of the first tab. bb's own stack goes up to
  * 70, which is where its dialogs and toasts live; 55 clears the chrome without
- * climbing over anything that is supposed to interrupt you.
+ * climbing over anything that is supposed to interrupt you. (The values sit on
+ * .bb-ft-window and .bb-ft-backdrop above.)
  */
-.bb-ft-window {
-  z-index: 55;
-}
 
-.bb-ft-backdrop {
-  z-index: 54;
-}
-
-/*
- * The terminal owns vertical dragging on a touch screen.
- *
- * xterm 6 has no touch scrolling of its own, so lib/pump.ts translates a drag
- * into scrollLines. For that to be reliable the browser must not claim the
- * gesture first — with the default touch-action it starts panning and the
- * touchmove handler never gets to preventDefault in time. Scoped to coarse
- * pointers so a mouse and a trackpad keep every native behaviour.
- */
-@media (pointer: coarse) {
-  .bb-ft-window .xterm {
-    touch-action: none;
-  }
-}
-
-/*
- * Touch targets in the tab strip.
- *
- * The desktop strip is deliberately dense — 24px tabs, 24px buttons — which on
- * a phone is well under the ~40px a thumb can hit reliably; the close X inside
- * a tab was 14px. On a coarse pointer the strip grows and every control in it
- * grows with it. Sizes live here rather than as utilities for the reason at the
- * top of this section: the plugin's own `max-*` utilities lose to bb's CSS.
- */
-@media (pointer: coarse) {
-  .bb-ft-window [data-bb-ft-tabbar] {
-    height: 48px;
-    gap: 6px;
+@media (prefers-reduced-motion: reduce) {
+  .bb-ft-window[data-state="closed"],
+  .bb-ft-window[data-state="open"],
+  .bb-ft-backdrop[data-state="closed"],
+  .bb-ft-backdrop[data-state="open"] {
+    transition: none;
   }
 
-  .bb-ft-window [data-bb-ft-tabbar] [role="tab"] {
-    height: 38px;
-    max-width: 12rem;
-    border-radius: 10px;
-    font-size: 13px;
+  .bb-ft-window .bb-ft-pill,
+  .bb-ft-window .bb-ft-panel,
+  .bb-ft-window .bb-ft-scrim {
+    animation: none;
   }
 
-  .bb-ft-window [data-bb-ft-tabbar] [role="tab"] > button {
-    width: 28px;
-    height: 28px;
-    /* Always visible: there is no hover to reveal it with. */
-    opacity: 1;
-  }
-
-  .bb-ft-window [data-bb-ft-tabbar] > button,
-  .bb-ft-window [data-bb-ft-tabbar] [data-bb-ft-action] {
-    width: 40px;
-    height: 40px;
-  }
-}
-
-/*
- * The jump-to-latest pill: shown only while the view is parked in history, so
- * new output may be landing out of sight below. Geometry here (see the note on
- * utilities above); bottom-centred so it never covers the scrollbar.
- */
-.bb-ft-window .bb-ft-pill {
-  position: absolute;
-  bottom: 10px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 5;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 12px 0 9px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: color-mix(in oklab, var(--card) 92%, transparent);
-  -webkit-backdrop-filter: blur(8px);
-  backdrop-filter: blur(8px);
-  color: var(--foreground);
-  font-size: 12px;
-  font-weight: 500;
-  box-shadow: 0 4px 16px rgb(0 0 0 / 0.25);
-  user-select: none;
-  -webkit-tap-highlight-color: transparent;
-  touch-action: manipulation;
-}
-
-.bb-ft-window .bb-ft-pill:active {
-  background: var(--state-active, var(--muted));
-}
-
-@media (pointer: coarse) {
-  .bb-ft-window .bb-ft-pill {
-    height: 40px;
-    padding: 0 16px 0 12px;
-    font-size: 13px;
+  .bb-ft-window .bb-ft-dot-pulse,
+  .bb-ft-window .bb-ft-spinner {
+    animation-duration: 2.4s;
   }
 }

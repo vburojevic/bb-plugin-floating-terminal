@@ -11,6 +11,22 @@
 
 export type TabStatus = "connecting" | "live" | "exited" | "error";
 
+/**
+ * What a tab you are not looking at has done since you last looked: printed
+ * something, or rung the bell — the conventional "come back" signal a long
+ * command ends with (`make; tput bel`). Cleared the moment the tab is shown.
+ */
+export type TabActivity = "none" | "output" | "bell";
+
+/** Where a tab's shell started, from the prefix of its scope key. */
+export type ScopeKind = "project" | "worktree" | "home";
+
+export function scopeKind(scopeKey: string): ScopeKind {
+  if (scopeKey.startsWith("env:")) return "worktree";
+  if (scopeKey.startsWith("home:")) return "home";
+  return "project";
+}
+
 export interface TabState {
   terminalId: string;
   scopeKey: string;
@@ -21,11 +37,14 @@ export interface TabState {
   statusDetail: string | null;
   /** An OSC title the shell set; the tab strip prefers it over `label`. */
   shellTitle: string | null;
+  /** A name the user gave the tab. Wins over everything the shell says. */
+  customName: string | null;
+  activity: TabActivity;
 }
 
 /** What the tab strip shows, qualified when another machine could be mistaken for this one. */
 export function tabName(tab: TabState, showHost = false): string {
-  const name = tab.shellTitle ?? tab.label;
+  const name = tab.customName ?? tab.shellTitle ?? tab.label;
   return showHost && tab.hostName !== "" ? `${name} · ${tab.hostName}` : name;
 }
 
@@ -45,6 +64,7 @@ export interface ServerTab {
   cwd: string;
   status: string;
   shellTitle: string | null;
+  customName?: string | null;
 }
 
 export interface Snapshot {
@@ -61,6 +81,11 @@ export type TabsAction =
       focusId?: string;
     }
   | { type: "activated"; terminalId: string }
+  | { type: "activity"; terminalId: string; activity: TabActivity }
+  /** Optimistic rename, so the strip never flashes the old name back. */
+  | { type: "named"; terminalId: string; customName: string | null }
+  /** Optimistic reorder; the server's snapshot confirms it. */
+  | { type: "moved"; terminalId: string; toIndex: number }
   | {
       type: "status";
       terminalId: string;
@@ -81,6 +106,8 @@ function fromServer(tab: ServerTab): TabState {
         : "exited",
     statusDetail: null,
     shellTitle: tab.shellTitle,
+    customName: tab.customName ?? null,
+    activity: "none",
   };
 }
 
@@ -106,10 +133,20 @@ export function tabsReducer(state: TabsState, action: TabsAction): TabsState {
         // to a tab the client already knows; status stays the client's. Reuse
         // the existing object when neither changed, or every snapshot would
         // re-render the whole strip.
-        if (existing.shellTitle === tab.shellTitle && existing.label === tab.label) {
+        const customName = tab.customName ?? null;
+        if (
+          existing.shellTitle === tab.shellTitle &&
+          existing.label === tab.label &&
+          existing.customName === customName
+        ) {
           return existing;
         }
-        return { ...existing, label: tab.label, shellTitle: tab.shellTitle };
+        return {
+          ...existing,
+          label: tab.label,
+          shellTitle: tab.shellTitle,
+          customName,
+        };
       });
 
       const has = (id: string | null | undefined) =>
@@ -126,11 +163,60 @@ export function tabsReducer(state: TabsState, action: TabsAction): TabsState {
       return { tabs, activeId, revision: action.snapshot.revision };
     }
 
-    case "activated":
-      if (!state.tabs.some((tab) => tab.terminalId === action.terminalId)) {
+    case "activated": {
+      const target = state.tabs.find((tab) => tab.terminalId === action.terminalId);
+      if (target === undefined) return state;
+      // Looking at a tab is what acknowledges its activity.
+      const tabs =
+        target.activity === "none"
+          ? state.tabs
+          : state.tabs.map((tab) =>
+              tab === target ? { ...tab, activity: "none" as const } : tab,
+            );
+      return { ...state, tabs, activeId: action.terminalId };
+    }
+
+    case "activity": {
+      const tab = state.tabs.find((entry) => entry.terminalId === action.terminalId);
+      // The tab you are looking at has nothing to tell you, and a bell
+      // outranks plain output until it is seen.
+      if (
+        tab === undefined ||
+        tab.activity === action.activity ||
+        (action.activity !== "none" && tab.terminalId === state.activeId) ||
+        (tab.activity === "bell" && action.activity === "output")
+      ) {
         return state;
       }
-      return { ...state, activeId: action.terminalId };
+      return {
+        ...state,
+        tabs: state.tabs.map((entry) =>
+          entry === tab ? { ...entry, activity: action.activity } : entry,
+        ),
+      };
+    }
+
+    case "named":
+      if (!state.tabs.some((tab) => tab.terminalId === action.terminalId)) return state;
+      return {
+        ...state,
+        tabs: state.tabs.map((tab) =>
+          tab.terminalId === action.terminalId
+            ? { ...tab, customName: action.customName }
+            : tab,
+        ),
+      };
+
+    case "moved": {
+      const from = state.tabs.findIndex((tab) => tab.terminalId === action.terminalId);
+      if (from === -1) return state;
+      const to = Math.max(0, Math.min(action.toIndex, state.tabs.length - 1));
+      if (from === to) return state;
+      const tabs = [...state.tabs];
+      const [moved] = tabs.splice(from, 1);
+      tabs.splice(to, 0, moved!);
+      return { ...state, tabs };
+    }
 
     case "status": {
       // Bail when unchanged: a failing poll re-reports the same error every

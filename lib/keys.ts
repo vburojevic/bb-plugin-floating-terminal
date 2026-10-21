@@ -109,3 +109,25 @@ export function tabCycleDirection(event: { key: string; code: string }): -1 | 1 
   if (event.code === "BracketRight" || event.key === "]" || event.key === "}") return 1;
   return null;
 }
+
+/**
+ * Ctrl+` shows or hides the window and Ctrl+Shift+` opens a shell where you
+ * are — the pair every editor with a terminal panel uses. Matched on the
+ * physical key as well as the character: on many layouts the key left of 1
+ * is not a backtick at all (a cedilla on Croatian, a caret on German), and
+ * with Shift held it reports `~` even on a US one.
+ */
+export function windowChord(event: {
+  key: string;
+  code: string;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  shiftKey: boolean;
+  altKey: boolean;
+}): "toggle" | "new-here" | null {
+  if (!event.ctrlKey || event.metaKey || event.altKey) return null;
+  if (event.key !== "`" && event.key !== "~" && event.code !== "Backquote") {
+    return null;
+  }
+  return event.shiftKey ? "new-here" : "toggle";
+}

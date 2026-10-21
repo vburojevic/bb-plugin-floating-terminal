@@ -20,6 +20,7 @@
 //     applied, so a slow `init` can never resurrect a closed tab or drop a
 //     freshly opened one just because it started earlier.
 import { defineRpcContract, type BbPluginApi } from "@bb/plugin-sdk";
+import { worktreeLabel } from "./lib/scopes";
 import { meaningfulShellTitle } from "./lib/terminal-io";
 import { z } from "zod";
 
@@ -37,7 +38,12 @@ const scopeSchema = z.object({
   /** Null means "start in the host's home directory". */
   cwd: z.string().nullable(),
   online: z.boolean(),
-  kind: z.enum(["project", "home"]),
+  /**
+   * `worktree` is a thread's own environment — an isolated checkout that is
+   * not the project's default one. Never listed; resolved from the thread in
+   * view and offered as "Here".
+   */
+  kind: z.enum(["project", "home", "worktree"]),
 });
 
 const tabSchema = z.object({
@@ -54,6 +60,8 @@ const tabSchema = z.object({
    * storage, so `bb terminal list` and bb's own UI show the same name.
    */
   shellTitle: z.string().nullable(),
+  /** A name the user gave the tab. Stored with the tab, so it survives restarts. */
+  customName: z.string().nullable(),
 });
 
 /** The authoritative tab state, versioned so stale replies can be discarded. */
@@ -67,6 +75,10 @@ const geometrySchema = z.object({
   cols: z.number().int().min(1).max(2000),
   rows: z.number().int().min(1).max(2000),
 });
+
+/** Longest name a tab can be given; past this the strip is only truncating. */
+const TAB_NAME_MAX = 60;
+const idSchema = z.string().min(1).max(200);
 
 export const rpcContract = defineRpcContract({
   /** Everything the window needs on open: directories, surviving tabs, prefs. */
@@ -82,6 +94,16 @@ export const rpcContract = defineRpcContract({
         shortcutEnabled: z.boolean(),
       }),
     }),
+  },
+  /**
+   * The directory the person is looking at: the thread's own worktree when it
+   * has one, else the project's checkout. Null on a page with neither.
+   */
+  context: {
+    input: z
+      .object({ projectId: idSchema.nullable(), threadId: idSchema.nullable() })
+      .strict(),
+    output: z.object({ here: scopeSchema.nullable() }),
   },
   openTab: {
     input: z.object({ scopeKey: z.string() }).extend(geometrySchema.shape).strict(),
@@ -99,6 +121,20 @@ export const rpcContract = defineRpcContract({
   renameTab: {
     input: z
       .object({ terminalId: z.string(), title: z.string().nullable() })
+      .strict(),
+    output: z.object({ snapshot: snapshotSchema }),
+  },
+  /** Give a tab a name of its own. Null or blank goes back to automatic naming. */
+  nameTab: {
+    input: z
+      .object({ terminalId: z.string(), name: z.string().max(200).nullable() })
+      .strict(),
+    output: z.object({ snapshot: snapshotSchema }),
+  },
+  /** Move a tab to another position in the strip. */
+  moveTab: {
+    input: z
+      .object({ terminalId: z.string(), toIndex: z.number().int().min(0).max(1000) })
       .strict(),
     output: z.object({ snapshot: snapshotSchema }),
   },
@@ -155,6 +191,15 @@ type Snapshot = z.infer<typeof snapshotSchema>;
 interface StoredTab {
   terminalId: string;
   scopeKey: string;
+  /** The user's name for the tab, when they gave it one. */
+  name?: string | null;
+  /**
+   * Captured at open for worktree tabs. Their scope is resolved from an
+   * environment rather than listed, so a later snapshot has nothing to look
+   * the label up in.
+   */
+  label?: string;
+  hostName?: string;
 }
 
 /**
@@ -177,6 +222,9 @@ const SCOPES_TTL_MS = 3000;
 const STATUS_TTL_MS = 2500;
 /** How long a verified tab snapshot may be composed from cache. */
 const SNAPSHOT_TTL_MS = 4000;
+/** A thread's environment changes rarely; a worktree's state a little more often. */
+const THREAD_ENV_TTL_MS = 30_000;
+const ENV_SCOPE_TTL_MS = 5000;
 
 class SdkTimeoutError extends Error {
   constructor(label: string, ms: number) {
@@ -310,6 +358,77 @@ export default async function plugin(bb: BbPluginApi) {
     return scopes;
   }
 
+  const threadEnvCache = new Map<string, { at: number; environmentId: string | null }>();
+  const envScopeCache = new Map<string, { at: number; scope: Scope | null }>();
+
+  function basename(path: string): string {
+    const segments = path.split("/").filter((part) => part !== "");
+    return segments[segments.length - 1] ?? path;
+  }
+
+  async function threadEnvironmentId(threadId: string): Promise<string | null> {
+    const cached = threadEnvCache.get(threadId);
+    if (cached !== undefined && Date.now() - cached.at < THREAD_ENV_TTL_MS) {
+      return cached.environmentId;
+    }
+    const result = (await withTimeout(
+      bb.sdk.threads.get({ threadId }),
+      SDK_TIMEOUT_MS,
+      "threads.get",
+    )) as { environmentId?: string | null; thread?: { environmentId?: string | null } };
+    const environmentId =
+      result.environmentId ?? result.thread?.environmentId ?? null;
+    threadEnvCache.set(threadId, { at: Date.now(), environmentId });
+    return environmentId;
+  }
+
+  /**
+   * The directory an environment lives in, as a scope. When it is the
+   * project's default checkout the project's own scope comes back instead, so
+   * "Here" and the project row are one entry — same recents, same tab label.
+   */
+  async function environmentScope(environmentId: string): Promise<Scope | null> {
+    const cached = envScopeCache.get(environmentId);
+    if (cached !== undefined && Date.now() - cached.at < ENV_SCOPE_TTL_MS) {
+      return cached.scope;
+    }
+    const [environment, scopes] = await Promise.all([
+      withTimeout(
+        bb.sdk.environments.get({ environmentId }),
+        SDK_TIMEOUT_MS,
+        "environments.get",
+      ),
+      listScopes(),
+    ]);
+    let scope: Scope | null = null;
+    if (environment.path !== null && environment.status === "ready") {
+      const path = environment.path;
+      const checkout = scopes.find(
+        (entry) =>
+          entry.kind === "project" &&
+          entry.hostId === environment.hostId &&
+          entry.cwd === path,
+      );
+      const home = scopes.find(
+        (entry) => entry.kind === "home" && entry.hostId === environment.hostId,
+      );
+      scope = checkout ?? {
+        key: `env:${environment.id}`,
+        label:
+          environment.name ??
+          (environment.branchName === null ? basename(path) : worktreeLabel(environment.branchName)),
+        detail: path,
+        hostId: environment.hostId,
+        hostName: home?.hostName ?? environment.hostId,
+        cwd: path,
+        online: home?.online ?? true,
+        kind: "worktree",
+      };
+    }
+    envScopeCache.set(environmentId, { at: Date.now(), scope });
+    return scope;
+  }
+
   async function readStoredTabs(): Promise<StoredTab[]> {
     return (await bb.storage.kv.get<StoredTab[]>(TABS_KEY)) ?? [];
   }
@@ -318,8 +437,12 @@ export default async function plugin(bb: BbPluginApi) {
     return (await bb.storage.kv.get<string[]>(RECENT_KEY)) ?? [];
   }
 
-  /** Most recent first, no duplicates. */
+  /**
+   * Most recent first, no duplicates. Worktrees stay out: they come and go
+   * with their threads, and "Here" already offers the one in view.
+   */
   async function rememberRecent(scopeKey: string): Promise<void> {
+    if (scopeKey.startsWith("env:")) return;
     const next = [scopeKey, ...(await readRecent()).filter((k) => k !== scopeKey)];
     await bb.storage.kv.set(RECENT_KEY, next.slice(0, RECENT_LIMIT));
   }
@@ -368,6 +491,12 @@ export default async function plugin(bb: BbPluginApi) {
     statusCache.delete(terminalId);
   }
 
+  /** What only the stored entry knows: the user's name for the tab. */
+  function withStored(tab: Tab, entry: StoredTab): Tab {
+    const customName = entry.name ?? null;
+    return tab.customName === customName ? tab : { ...tab, customName };
+  }
+
   function finishSnapshot(
     tabs: Tab[],
     revision: number,
@@ -400,7 +529,7 @@ export default async function plugin(bb: BbPluginApi) {
         bb.storage.kv.get<string>(ACTIVE_TAB_KEY),
       ]);
       return finishSnapshot(
-        stored.map((entry) => lastKnownTabs.get(entry.terminalId)!),
+        stored.map((entry) => withStored(lastKnownTabs.get(entry.terminalId)!, entry)),
         revision ?? 0,
         storedActive,
       );
@@ -430,8 +559,9 @@ export default async function plugin(bb: BbPluginApi) {
           if (!isLiveStatus(session.status)) return null;
           const scope =
             scopes.find((item) => item.key === entry.scopeKey) ?? null;
-          const label = scope?.label ?? labelFromCwd(session.initialCwd);
-          const hostName = scope?.hostName ?? "";
+          const label =
+            entry.label ?? scope?.label ?? labelFromCwd(session.initialCwd);
+          const hostName = entry.hostName ?? scope?.hostName ?? "";
           const tab: Tab = {
             terminalId: session.id,
             scopeKey: entry.scopeKey,
@@ -445,6 +575,7 @@ export default async function plugin(bb: BbPluginApi) {
               defaultTitle: defaultTitle(label, hostName),
               cwd: session.initialCwd,
             }),
+            customName: entry.name ?? null,
           };
           lastKnownTabs.set(tab.terminalId, tab);
           return tab;
@@ -453,7 +584,8 @@ export default async function plugin(bb: BbPluginApi) {
             // Slow, not gone: keep the tab on its last known state rather
             // than pruning a live session just because the host is laggy.
             sawTimeout = true;
-            return lastKnownTabs.get(entry.terminalId) ?? null;
+            const known = lastKnownTabs.get(entry.terminalId);
+            return known === undefined ? null : withStored(known, entry);
           }
           // Session is gone entirely; drop the tab.
           forgetTab(entry.terminalId);
@@ -466,9 +598,10 @@ export default async function plugin(bb: BbPluginApi) {
     let revision = (await bb.storage.kv.get<number>(REVISION_KEY)) ?? 0;
     if (tabs.length !== stored.length && !sawTimeout) {
       // Pruning is itself a change, so it earns a new revision.
+      const kept = new Set(tabs.map((tab) => tab.terminalId));
       await bb.storage.kv.set(
         TABS_KEY,
-        tabs.map(({ terminalId, scopeKey }) => ({ terminalId, scopeKey })),
+        stored.filter((entry) => kept.has(entry.terminalId)),
       );
       revision = await bumpRevision();
     }
@@ -480,8 +613,10 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   async function requireScope(scopeKey: string): Promise<Scope> {
-    const scope = (await listScopes()).find((entry) => entry.key === scopeKey);
-    if (scope === undefined) {
+    const scope = scopeKey.startsWith("env:")
+      ? await environmentScope(scopeKey.slice("env:".length)).catch(() => null)
+      : (await listScopes()).find((entry) => entry.key === scopeKey);
+    if (scope === undefined || scope === null) {
       throw new Error("That directory is no longer available.");
     }
     if (!scope.online) {
@@ -516,7 +651,20 @@ export default async function plugin(bb: BbPluginApi) {
       status: created.status,
       exitCode: created.exitCode,
       shellTitle: null,
+      customName: null,
     };
+  }
+
+  /** A worktree's label cannot be looked up later, so the entry carries it. */
+  function storedEntry(tab: Tab, scope: Scope): StoredTab {
+    return scope.kind === "worktree"
+      ? {
+          terminalId: tab.terminalId,
+          scopeKey: tab.scopeKey,
+          label: tab.label,
+          hostName: tab.hostName,
+        }
+      : { terminalId: tab.terminalId, scopeKey: tab.scopeKey };
   }
 
   bb.rpc.register(rpcContract, {
@@ -539,6 +687,29 @@ export default async function plugin(bb: BbPluginApi) {
       };
     },
 
+    async context({ projectId, threadId }) {
+      if (threadId !== null) {
+        try {
+          const environmentId = await threadEnvironmentId(threadId);
+          const scope =
+            environmentId === null ? null : await environmentScope(environmentId);
+          if (scope !== null) return { here: scope };
+        } catch {
+          // A thread we cannot read (deleted, another account's) is not an
+          // error worth surfacing; fall back to the project.
+        }
+      }
+      if (projectId === null) return { here: null };
+      try {
+        const scopes = await listScopes();
+        return {
+          here: scopes.find((entry) => entry.key === `project:${projectId}`) ?? null,
+        };
+      } catch {
+        return { here: null };
+      }
+    },
+
     async openTab({ scopeKey, cols, rows }) {
       // The slow parts — resolving the scope and spawning the PTY — run
       // outside the mutation mutex. Held across a create they queued every
@@ -548,7 +719,7 @@ export default async function plugin(bb: BbPluginApi) {
       const opened = await createSession(scope, cols, rows);
       return serialize(async () => {
         const stored = await readStoredTabs();
-        stored.push({ terminalId: opened.terminalId, scopeKey: opened.scopeKey });
+        stored.push(storedEntry(opened, scope));
         await bb.storage.kv.set(TABS_KEY, stored);
         await bb.storage.kv.set(ACTIVE_TAB_KEY, opened.terminalId);
         await rememberRecent(opened.scopeKey);
@@ -602,18 +773,18 @@ export default async function plugin(bb: BbPluginApi) {
       const stored = await readStoredTabs();
       const entry = stored.find((tab) => tab.terminalId === terminalId);
       // Renaming a tab this window does not own would let a stale client
-      // rename somebody else's session out from under them.
-      if (entry === undefined) {
+      // rename somebody else's session out from under them. And a tab the
+      // user named keeps that name: the shell's next prompt does not get to
+      // overwrite it.
+      if (entry === undefined || (entry.name ?? null) !== null) {
         return serialize(async () => ({ snapshot: await snapshot() }));
       }
 
       // Null means "go back to the name the tab was opened with", which is
       // what the tab strip falls back to showing.
-      const scope = (await listScopes()).find(
-        (item) => item.key === entry.scopeKey,
-      );
+      const known = lastKnownTabs.get(terminalId);
       const restored =
-        scope === undefined ? null : defaultTitle(scope.label, scope.hostName);
+        known === undefined ? null : defaultTitle(known.label, known.hostName);
       const next = title ?? restored;
       if (next === null) {
         return serialize(async () => ({ snapshot: await snapshot() }));
@@ -643,6 +814,48 @@ export default async function plugin(bb: BbPluginApi) {
           });
         }
         await bumpRevision();
+        return { snapshot: await snapshot() };
+      });
+    },
+
+    async nameTab({ terminalId, name }) {
+      const trimmed = name?.trim().replace(/\s+/g, " ").slice(0, TAB_NAME_MAX) ?? "";
+      const next = trimmed === "" ? null : trimmed;
+      const result = await serialize(async () => {
+        const stored = await readStoredTabs();
+        const index = stored.findIndex((entry) => entry.terminalId === terminalId);
+        if (index === -1) throw new Error("That tab is no longer open.");
+        stored[index] = { ...stored[index]!, name: next };
+        await bb.storage.kv.set(TABS_KEY, stored);
+        await bumpRevision();
+        return { snapshot: await snapshot() };
+      });
+      // bb's own terminal list shows the same name; cosmetic, so best-effort
+      // and after the reply is settled.
+      const known = lastKnownTabs.get(terminalId);
+      if (known !== undefined) {
+        withTimeout(
+          bb.sdk.terminals.rename({
+            terminalId,
+            title: next ?? known.shellTitle ?? defaultTitle(known.label, known.hostName),
+          }),
+          SDK_TIMEOUT_MS,
+          "terminals.rename",
+        ).catch(() => {});
+      }
+      return result;
+    },
+
+    async moveTab({ terminalId, toIndex }) {
+      return serialize(async () => {
+        const stored = await readStoredTabs();
+        const from = stored.findIndex((entry) => entry.terminalId === terminalId);
+        if (from !== -1) {
+          const [entry] = stored.splice(from, 1);
+          stored.splice(Math.min(toIndex, stored.length), 0, entry!);
+          await bb.storage.kv.set(TABS_KEY, stored);
+          await bumpRevision();
+        }
         return { snapshot: await snapshot() };
       });
     },
@@ -686,18 +899,19 @@ export default async function plugin(bb: BbPluginApi) {
           ).catch(() => {});
           throw new Error("That tab is no longer open.");
         }
-        // Replace in place so the tab keeps its position in the strip.
-        stored[index] = {
-          terminalId: restarted.terminalId,
-          scopeKey: restarted.scopeKey,
-        };
+        // Replace in place so the tab keeps its position — and its name.
+        stored[index] = { ...stored[index]!, terminalId: restarted.terminalId };
         await bb.storage.kv.set(TABS_KEY, stored);
         const storedActive = await bb.storage.kv.get<string>(ACTIVE_TAB_KEY);
         if (storedActive === terminalId) {
           await bb.storage.kv.set(ACTIVE_TAB_KEY, restarted.terminalId);
         }
         forgetTab(terminalId);
-        lastKnownTabs.set(restarted.terminalId, restarted);
+        lastKnownTabs.set(restarted.terminalId, {
+          ...restarted,
+          label: stored[index]!.label ?? restarted.label,
+          hostName: stored[index]!.hostName ?? restarted.hostName,
+        });
         rememberStatus(restarted.terminalId, restarted.status, restarted.exitCode);
         await bumpRevision();
         return { snapshot: await snapshot(), restarted };

@@ -7,6 +7,10 @@
 // opens and closes real shells there (it asserts it leaves none behind). Point
 // it somewhere else with BB_APP_URL.
 //
+// It is safe to run against the bb you work in: it only ever types into, and
+// closes, the shell it opened itself. With shells already open the empty-state
+// checks are skipped rather than earned by closing yours.
+//
 // Touch gestures are dispatched over CDP, which only Chromium exposes. On
 // WebKit — worth running because it is the engine iOS Safari uses — those
 // checks report SKIP rather than passing silently.
@@ -62,13 +66,23 @@ const sessions = () => {
 };
 
 const launcher = ENGINE === "webkit" ? webkit : chromium;
-const browser = await launcher.launch({ headless: ENGINE === "chromium" });
+// PW_CHROMIUM / PW_WEBKIT point at a browser build when the one this
+// Playwright expects is not the one installed.
+const executablePath = (ENGINE === "webkit" ? process.env.PW_WEBKIT : process.env.PW_CHROMIUM) || undefined;
+const browser = await launcher.launch({ headless: ENGINE === "chromium", executablePath });
 const device = devices[DEVICE];
 const ctx = await browser.newContext({ ...device, colorScheme: "dark" });
 const page = await ctx.newPage();
 const cdp = ENGINE === "chromium" ? await ctx.newCDPSession(page) : null;
 const errors = [];
-page.on("pageerror", (e) => errors.push(String(e).slice(0, 180)));
+// "ResizeObserver loop completed with undelivered notifications" is the
+// browser saying it deferred a resize notification to the next frame, not an
+// exception — and WebKit raises it from bb's own compose view (traced to
+// RootComposeView, not this plugin), intermittently, on the page this runs on.
+page.on("pageerror", (e) => {
+  if (/ResizeObserver loop/.test(String(e))) return;
+  errors.push(String(e).slice(0, 180));
+});
 const wait = (ms) => page.waitForTimeout(ms);
 
 /**
@@ -106,12 +120,20 @@ await wait(ENGINE === "webkit" ? 12000 : 10000);
 const compact = (device.viewport?.width ?? 0) < 768;
 
 // ---------------------------------------------------------------- open it
-await page.keyboard.down("Control");
-await page.keyboard.press("`");
-await page.keyboard.up("Control");
-await wait(3200);
+// bb mounts plugin frontends after its own boot, which on a cold page (or
+// straight after a plugin reload) can land after a fixed sleep. Ask again
+// until the window is actually up rather than failing the whole run.
 const term = page.locator('[aria-label="Floating terminal"]');
-check("window opens", (await term.count()) === 1);
+const opened0 = await until(async () => {
+  if ((await term.count()) === 1 && (await term.getAttribute("data-state")) === "open") return true;
+  await page.keyboard.down("Control");
+  await page.keyboard.press("`");
+  await page.keyboard.up("Control");
+  await wait(1200);
+  return (await term.count()) === 1 && (await term.getAttribute("data-state")) === "open";
+}, 30000, 300);
+await wait(2000);
+check("window opens", opened0);
 
 // ------------------------------------------------------------ 1. layout
 const layout = await page.evaluate(() => {
@@ -127,7 +149,7 @@ const layout = await page.evaluate(() => {
     vw: window.innerWidth,
     vh: window.innerHeight,
     inline: /left:|width:/.test(w.getAttribute("style") ?? ""),
-    edges: [...w.children].filter((c) => String(c.className).startsWith("absolute")).length,
+    edges: w.querySelectorAll(".bb-ft-edge").length,
     backdropBlur: bd ? getComputedStyle(bd).backdropFilter : null,
     gripDisplay: grip ? getComputedStyle(grip).display : "absent",
     radius: getComputedStyle(w).borderRadius,
@@ -161,14 +183,11 @@ check("nothing of bb's paints over the tab bar", cover.inside, cover.tag);
 check("z-index clears bb chrome (50) and stays under its top layer (70)", layout.z > 50 && layout.z < 70, String(layout.z));
 
 // ------------------------------------------------------- 3. empty state
-for (let i = 0; i < 8; i++) {
-  const c = term.getByRole("button", { name: /^Close / });
-  if ((await c.count()) === 0) break;
-  await c.first().click();
-  await wait(1300);
-}
-await wait(1200);
-const empty = await page.evaluate(() => {
+const tabIds = () =>
+  page.evaluate(() => [...document.querySelectorAll('[aria-label="Floating terminal"] [role="tab"]')].map((t) => t.dataset.tabId));
+const preexisting = new Set(await tabIds());
+const hadShells = preexisting.size > 0;
+const empty = hadShells ? null : await page.evaluate(() => {
   const w = document.querySelector('[aria-label="Floating terminal"]');
   const list = w.querySelector("[cmdk-list]");
   const r = (e) => (e ? e.getBoundingClientRect() : null);
@@ -184,11 +203,17 @@ const empty = await page.evaluate(() => {
     listScrollTop: list?.scrollTop ?? null,
   };
 });
+if (empty === null) {
+  for (const name of ["empty state heading visible", "directory list stays inside the sheet", "groups ordered Recent -> Projects -> Machines", "directory list scrolls by touch"]) {
+    skip(name, "shells already open; not closing them");
+  }
+} else {
 check("empty state heading visible", empty.heading === "Start a shell" && empty.headingVisible);
 check("directory list stays inside the sheet", empty.listInside);
+const groups = empty.groups.filter((g) => g !== "Here");
 check("groups ordered Recent -> Projects -> Machines",
-  JSON.stringify(empty.groups) === JSON.stringify(["Recent", "Projects", "Machines"]) ||
-  JSON.stringify(empty.groups) === JSON.stringify(["Projects", "Machines"]), empty.groups.join(" > "));
+  JSON.stringify(groups) === JSON.stringify(["Recent", "Projects", "Machines"]) ||
+  JSON.stringify(groups) === JSON.stringify(["Projects", "Machines"]), empty.groups.join(" > "));
 
 if (cdp && empty.listScrollable) {
   const lb = await term.locator("[cmdk-list]").boundingBox();
@@ -198,14 +223,35 @@ if (cdp && empty.listScrollable) {
   check("directory list scrolls by touch", after > 0, `scrollTop ${after}`);
 } else if (!cdp) skip("directory list scrolls by touch", "needs CDP");
 else skip("directory list scrolls by touch", "list fits, nothing to scroll");
+}
 
-// --------------------------------------------------------- 4. open a shell
-const before = sessions().length;
+// ------------------------------------------- 4. the + menu, and a shell
+// Every overlay the window opens has to paint above it. They used to sit at
+// z-50 under a z-55 window, so + opened its menu (or, on a phone, its drawer)
+// invisibly behind the window — and hit-testing cannot catch that, because a
+// modal menu turns pointer-events off on everything else.
+const beforeIds = new Set(sessions().map((s) => s.id));
+const beforeCount = beforeIds.size;
+if (hadShells) {
+  await term.getByRole("button", { name: "New shell" }).click();
+  await wait(900);
+  const stack = await page.evaluate(() => {
+    const w = document.querySelector('[aria-label="Floating terminal"]');
+    const layer = document.querySelector("[data-radix-popper-content-wrapper]") ??
+      document.querySelector("[data-vaul-drawer]");
+    return { window: Number(getComputedStyle(w).zIndex), layer: layer ? Number(getComputedStyle(layer).zIndex) : null };
+  });
+  check("the + menu paints above the window", stack.layer !== null && stack.layer > stack.window,
+    `menu z=${stack.layer}, window z=${stack.window}`);
+} else {
+  skip("the + menu paints above the window", "covered by the empty-state picker");
+}
 await page.locator('[cmdk-item][aria-disabled="false"]').first().click();
 const opened = await until(
-  async () => (await term.getByRole("tab").count()) === 1 && sessions().length === before + 1,
+  async () => (await tabIds()).some((tab) => !preexisting.has(tab)) && sessions().length === beforeCount + 1,
 );
-check("opening a directory starts a shell", opened, `${sessions().length - before} new session(s)`);
+check("opening a directory starts a shell", opened, `${sessions().length - beforeCount} new session(s)`);
+const mine = (await tabIds()).find((tab) => !preexisting.has(tab));
 
 // ------------------------------------------------------------ 5. key bar
 // Only in sheet mode: a window-mode viewport has a real keyboard with all of
@@ -236,7 +282,8 @@ if (compact) {
 }
 
 // ----------------------------------------------- 7. keys reach the shell
-const id = sessions()[0]?.id;
+// The shell this run opened, never one that was already there.
+const id = sessions().find((s) => !beforeIds.has(s.id))?.id ?? mine;
 if (id) {
   sh(`bb terminal send ${id} --text 'clear' --enter`);
   await wait(1200);
@@ -248,12 +295,15 @@ const screen = term.locator(".xterm-screen").locator("visible=true").first();
 /** The pump polls, and against a remote host it can be seconds behind the pty.
  *  Wait for the scrollback to actually exist rather than sleeping and hoping —
  *  a fixed sleep here reported "scrolling is broken" on a slow session. */
-const hasScrollback = () => page.evaluate(() => {
-  const v = document.querySelector('[aria-label="Floating terminal"] .scrollbar.vertical');
+// Scoped to the tab on screen: with other shells open, the first terminal in
+// the window is somebody else's, display:none behind this one.
+const visibleXterm = `[...document.querySelectorAll('[aria-label="Floating terminal"] .xterm')].find((e) => e.offsetParent !== null)`;
+const hasScrollback = () => page.evaluate((query) => {
+  const v = eval(query)?.querySelector(".scrollbar.vertical");
   const s = v?.querySelector(".slider");
   if (!v || !s) return false;
   return s.getBoundingClientRect().height < v.getBoundingClientRect().height - 4;
-});
+}, visibleXterm);
 check("terminal catches up with the shell", await until(hasScrollback));
 
 // -------------------------------------------------------- 8. tap to focus
@@ -262,15 +312,15 @@ if (cdp) {
   await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: Math.round(sb.x + sb.width / 2), y: Math.round(sb.y + 60) }] });
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
   await wait(700);
-  const focused = await page.evaluate(() => document.querySelector('[aria-label="Floating terminal"] .xterm')?.classList.contains("focus"));
+  const focused = await page.evaluate((query) => eval(query)?.classList.contains("focus"), visibleXterm);
   check("tap focuses the terminal", focused === true);
 } else skip("tap focuses the terminal", "needs CDP");
 
 // ------------------------------------------------------- 9. touch scroll
-const slider = () => page.evaluate(() => {
-  const s = document.querySelector('[aria-label="Floating terminal"] .xterm-scrollable-element .scrollbar.vertical .slider');
+const slider = () => page.evaluate((query) => {
+  const s = eval(query)?.querySelector(".xterm-scrollable-element .scrollbar.vertical .slider");
   return s ? Math.round(s.getBoundingClientRect().top) : null;
-});
+}, visibleXterm);
 if (cdp) {
   const sb = await screen.boundingBox();
   const cx = Math.round(sb.x + sb.width / 2), cy = Math.round(sb.y + sb.height / 2);
@@ -364,26 +414,30 @@ if (compact) {
   check("tapping the backdrop hides the sheet", hidden === "closed", hidden);
   await page.keyboard.down("Control"); await page.keyboard.press("`"); await page.keyboard.up("Control");
   check("reopening restores the running shell",
-    await until(async () => (await term.getByRole("tab").count()) === 1, 10000));
+    await until(async () => (await tabIds()).includes(mine), 10000));
 } else {
   skip("tapping the backdrop hides the sheet", "window mode");
-  check("reopening restores the running shell", (await term.getByRole("tab").count()) === 1);
+  check("reopening restores the running shell", (await tabIds()).includes(mine));
 }
 
 // -------------------------------------------------------- 14. close down
-for (let i = 0; i < 8; i++) {
-  const c = term.getByRole("button", { name: /^Close / });
-  if ((await c.count()) === 0) break;
-  await c.first().click();
-  await wait(1500);
+// Only the tab this run opened.
+await term.locator(`[data-tab-id="${mine}"]`).getByRole("button", { name: /^Close / }).click({ force: true });
+await wait(1500);
+if (hadShells) {
+  check("closing our tab leaves the others", await until(async () => {
+    const left = await tabIds();
+    return !left.includes(mine) && [...preexisting].every((tab) => left.includes(tab));
+  }, 8000));
+} else {
+  await wait(1200);
+  check("closing the last tab returns the picker", (await term.locator("[cmdk-list]").count()) === 1);
 }
-await wait(1200);
-check("closing the last tab returns the picker", (await term.locator("[cmdk-list]").count()) === 1);
 
 // Closing is an RPC to the host that owns the pty, and against a remote one it
 // lands well after the tab disappears. Wait for it rather than racing it — a
 // genuine leak never clears, so a bounded wait still catches one.
-check("no shells left behind", await until(() => sessions().length === before, 12000),
+check("no shells left behind", await until(() => sessions().length === beforeCount, 12000),
   `${sessions().length} sessions`);
 check("no page errors", errors.length === 0, errors.slice(0, 2).join(" | "));
 

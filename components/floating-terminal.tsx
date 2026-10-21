@@ -9,6 +9,12 @@
 // Nothing renders until the window is first opened; from then on it stays
 // mounted even while hidden, which is what keeps every tab's scrollback alive.
 // Show/hide is a CSS transition driven by data-state.
+//
+// The element tree is two boxes on purpose. The outer one is positioned and
+// owns the resize handles, which straddle its edge; the inner one is the
+// rounded, clipped surface. With the handles inside the clip they sat on top
+// of the title bar, and the top-right corner handle swallowed part of the hide
+// button.
 import {
   useCallback,
   useEffect,
@@ -23,12 +29,25 @@ import { Icon } from "@/components/ui/icon";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useIsCompactViewport } from "@/components/ui/hooks/use-compact-viewport";
 import { ShellPicker } from "@/components/shell-picker";
-import type { ScopeOption } from "@/lib/scopes";
 import { FindBar } from "@/components/find-bar";
 import { KeyToolbar } from "@/components/key-toolbar";
 import { TabBar } from "@/components/tab-bar";
 import { TerminalView } from "@/components/terminal-view";
-import { windowController } from "@/lib/controller";
+import {
+  Pill,
+  PillBar,
+  ShortcutsPanel,
+  TerminalMenu,
+} from "@/components/terminal-overlays";
+import { MOD, WindowMenu } from "@/components/window-menu";
+import { quoteForAgent } from "@/lib/commands";
+import {
+  composerBridge,
+  hostContext,
+  windowController,
+  type HostContext,
+  type WindowCommand,
+} from "@/lib/controller";
 import {
   clampFrame,
   installDrag,
@@ -36,34 +55,28 @@ import {
   loadFrame,
   RESIZE_EDGES,
   saveFrame,
+  snapFrame,
   type Frame,
+  type SnapTarget,
 } from "@/lib/frame";
-import type { TerminalPump } from "@/lib/pump";
+import { copyText } from "@/lib/host";
+import { clampFontSize, loadFontOverride, saveFontOverride } from "@/lib/prefs";
+import type { FindOptions, TerminalPump } from "@/lib/pump";
 import {
   arrowSequence,
   isTabCycleKey,
   tabCycleDirection,
+  windowChord,
   type ToolbarKey,
 } from "@/lib/keys";
 import { createRpcClient } from "@/lib/rpc";
+import type { ScopeOption } from "@/lib/scopes";
+import { resolveTerminalTheme } from "@/lib/theme";
 import { trackVisualViewport } from "@/lib/viewport";
 import { emptyTabs, tabsReducer, type TabStatus } from "@/lib/tabs";
-import { cn } from "@/lib/utils";
 import type { rpcContract } from "../server";
 
 const PLUGIN_ID = "floating-terminal";
-
-/** Edge hit areas, wide enough to grab without visually thickening the border. */
-const EDGE_CLASS: Record<string, string> = {
-  n: "absolute inset-x-3 top-0 h-1.5 cursor-ns-resize",
-  s: "absolute inset-x-3 bottom-0 h-1.5 cursor-ns-resize",
-  e: "absolute inset-y-3 right-0 w-1.5 cursor-ew-resize",
-  w: "absolute inset-y-3 left-0 w-1.5 cursor-ew-resize",
-  ne: "absolute right-0 top-0 size-3 cursor-nesw-resize",
-  nw: "absolute left-0 top-0 size-3 cursor-nwse-resize",
-  se: "absolute bottom-0 right-0 size-3 cursor-nwse-resize",
-  sw: "absolute bottom-0 left-0 size-3 cursor-nesw-resize",
-};
 
 /** Long enough that a per-prompt title setter costs one rename, not dozens. */
 const TITLE_RENAME_DEBOUNCE_MS = 500;
@@ -75,6 +88,16 @@ const MAX_GUTTER = 16;
 const DEFAULT_COLS = 80;
 const DEFAULT_ROWS = 24;
 
+/** "Send output to the agent" without a selection: the recent tail, not 10k lines. */
+const AGENT_TAIL_LINES = 120;
+
+/**
+ * A fresh shell is still drawing its first prompt when its first bytes land;
+ * text pasted before the line editor is up would arrive without the bracketed
+ * paste mode that keeps a multi-line command from running line by line.
+ */
+const FIRST_PROMPT_SETTLE_MS = 250;
+
 /**
  * The window with nothing in it. Its job is to get you into a shell in one
  * click and to answer the one question that changes how you use it — whether
@@ -83,14 +106,29 @@ const DEFAULT_ROWS = 24;
 function EmptyState({
   scopes,
   recentScopeKeys,
+  here,
   showHosts,
+  starting,
   onPick,
 }: {
   scopes: ScopeOption[];
   recentScopeKeys: string[];
+  here: ScopeOption | null;
   showHosts: boolean;
+  starting: string | null;
   onPick: (scopeKey: string) => void;
 }) {
+  if (starting !== null) {
+    return (
+      <div className="flex size-full flex-col items-center justify-center gap-3 p-4 text-center">
+        <span className="bb-ft-spinner" aria-hidden="true" />
+        <p className="text-xs text-muted-foreground" aria-live="polite">
+          Starting a shell in <span className="text-foreground">{starting}</span>…
+        </p>
+      </div>
+    );
+  }
+
   return (
     // A column, not a row: `items-center` on a row container sizes the child
     // from its content, so a long directory list grew past the window and got
@@ -100,20 +138,37 @@ function EmptyState({
     <div className="flex size-full min-h-0 flex-col items-center justify-center overflow-hidden p-4">
       {/* Centred while it fits, filling and scrolling once it does not. */}
       <div className="flex min-h-0 w-full min-w-0 max-w-md flex-col gap-3">
-        <div className="flex shrink-0 flex-col gap-1 px-1">
-          <h2 className="text-sm font-medium text-foreground">Start a shell</h2>
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            Pick where it runs. Shells keep going while this window is hidden.
-          </p>
+        <div className="flex shrink-0 items-start gap-3 px-1">
+          <span className="bb-ft-empty-mark" aria-hidden="true">
+            <Icon name="Terminal" className="size-4" />
+          </span>
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <h2 className="text-sm font-medium text-foreground">Start a shell</h2>
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              Pick where it runs. Shells keep going while this window is hidden.
+            </p>
+          </div>
         </div>
         <ShellPicker
           scopes={scopes}
           recentScopeKeys={recentScopeKeys}
+          here={here}
           showHosts={showHosts}
           onPick={onPick}
           fill
-          className="min-h-0 flex-1 rounded-lg border border-border bg-background/40"
+          className="bb-ft-empty-picker min-h-0 flex-1"
         />
+        <p className="bb-ft-hints shrink-0" aria-hidden="true">
+          <span>
+            <kbd className="bb-ft-kbd">Ctrl+`</kbd> show/hide
+          </span>
+          <span>
+            <kbd className="bb-ft-kbd">Ctrl+Shift+`</kbd> shell here
+          </span>
+          <span>
+            <kbd className="bb-ft-kbd">{MOD}F</kbd> find
+          </span>
+        </p>
       </div>
     </div>
   );
@@ -123,6 +178,11 @@ export function FloatingTerminal() {
   const open = useSyncExternalStore(
     windowController.subscribe,
     windowController.isOpen,
+  );
+  const context = useSyncExternalStore(hostContext.subscribe, hostContext.get);
+  const composerAvailable = useSyncExternalStore(
+    composerBridge.subscribe,
+    composerBridge.available,
   );
 
   const rpcRef = useRef(createRpcClient<typeof rpcContract>(PLUGIN_ID));
@@ -140,10 +200,33 @@ export function FloatingTerminal() {
   const [state, dispatch] = useReducer(tabsReducer, emptyTabs);
   const [scopes, setScopes] = useState<ScopeOption[]>([]);
   const [recentScopeKeys, setRecentScopeKeys] = useState<string[]>([]);
-  const [fontSize, setFontSize] = useState(13);
+  /** The directory in view — the thread's worktree, or the project. */
+  const [here, setHere] = useState<ScopeOption | null>(null);
+  const [settingFontSize, setSettingFontSize] = useState(13);
+  const [fontOverride, setFontOverride] = useState<number | null>(loadFontOverride);
+  const fontSize = fontOverride ?? settingFontSize;
   const [shortcutEnabled, setShortcutEnabled] = useState(true);
   const [themeVersion, setThemeVersion] = useState(0);
   const [fitVersion, setFitVersion] = useState(0);
+  /** The terminal's exact background, so the gutters around it match to the pixel. */
+  const [surface, setSurface] = useState<string | null>(null);
+  const [ctrlArmed, setCtrlArmed] = useState(false);
+  /** Window mode only. Never persisted: a maximized session is a mood, not a layout. */
+  const [maximized, setMaximized] = useState(false);
+  /** Whether the active tab sits at the newest output; drives the pill. */
+  const [atBottom, setAtBottom] = useState(true);
+  /** Output has landed below the parked view since it was parked. */
+  const [newOutput, setNewOutput] = useState(false);
+  const [selection, setSelection] = useState("");
+  const [findOpen, setFindOpen] = useState(false);
+  const [findOptions, setFindOptions] = useState<FindOptions>({});
+  const [findResults, setFindResults] = useState<{ index: number; count: number } | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [newMenuOpen, setNewMenuOpen] = useState(false);
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  /** The label of a directory a shell is being started in, while it is. */
+  const [starting, setStarting] = useState<string | null>(null);
   /**
    * BB appends the plugin stylesheet to <head> without awaiting its load, so
    * anything rendered before it arrives paints unstyled — a full-width block of
@@ -151,18 +234,12 @@ export function FloatingTerminal() {
    * out of the DOM until the window is first opened removes that window
    * entirely, and costs nothing for a session where it is never used.
    */
-  const [ctrlArmed, setCtrlArmed] = useState(false);
-  /** Window mode only. Never persisted: a maximized session is a mood, not a layout. */
-  const [maximized, setMaximized] = useState(false);
-  /** Whether the active tab sits at the newest output; drives the pill. */
-  const [atBottom, setAtBottom] = useState(true);
-  const [findOpen, setFindOpen] = useState(false);
-  const [findResults, setFindResults] = useState<{ index: number; count: number } | null>(null);
   const [mounted, setMounted] = useState(false);
   /** One frame behind `mounted`, so the first open still animates in. */
   const [armed, setArmed] = useState(false);
 
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
   const headerRef = useRef<HTMLDivElement | null>(null);
   const edgeRefs = useRef(new Map<string, HTMLDivElement>());
   const pumps = useRef(new Map<string, TerminalPump>());
@@ -172,6 +249,8 @@ export function FloatingTerminal() {
    * PTY that no tab strip will ever show.
    */
   const restarting = useRef(new Set<string>());
+  /** Text waiting for a freshly opened shell's first prompt. */
+  const pendingPaste = useRef<{ terminalId: string; text: string } | null>(null);
   const maximizedRef = useRef(false);
   maximizedRef.current = maximized;
 
@@ -234,6 +313,8 @@ export function FloatingTerminal() {
   // size, and briefly mis-wraps until the first resize lands.
   const activeIdRef = useRef<string | null>(null);
   activeIdRef.current = state.activeId;
+  const tabsRef = useRef(state.tabs);
+  tabsRef.current = state.tabs;
 
   const geometry = useCallback(() => {
     const activeId = activeIdRef.current;
@@ -241,6 +322,12 @@ export function FloatingTerminal() {
     return pump === undefined || pump === null
       ? { cols: DEFAULT_COLS, rows: DEFAULT_ROWS }
       : { cols: pump.cols(), rows: pump.rows() };
+  }, []);
+
+  const activePump = useCallback((): TerminalPump | null => {
+    const activeId = activeIdRef.current;
+    if (activeId === null) return null;
+    return pumps.current.get(activeId) ?? null;
   }, []);
 
   /**
@@ -254,7 +341,7 @@ export function FloatingTerminal() {
       const result = await rpc.call("init");
       setScopes(result.scopes);
       setRecentScopeKeys(result.recentScopeKeys);
-      setFontSize(result.prefs.fontSize);
+      setSettingFontSize(result.prefs.fontSize);
       setShortcutEnabled(result.prefs.shortcutEnabled);
       dispatch({ type: "synced", snapshot: result.snapshot });
     } catch {
@@ -262,8 +349,22 @@ export function FloatingTerminal() {
     }
   }, [rpc]);
 
+  /** Ask the server what "here" means for a route. Null when it means nothing. */
+  const resolveHere = useCallback(
+    async (where: HostContext): Promise<ScopeOption | null> => {
+      if (where.projectId === null && where.threadId === null) return null;
+      try {
+        return (await rpc.call("context", where)).here;
+      } catch {
+        return null;
+      }
+    },
+    [rpc],
+  );
+
   const openTab = useCallback(
-    async (scopeKey: string) => {
+    async (scopeKey: string, label?: string): Promise<string | null> => {
+      setStarting(label ?? "a new directory");
       try {
         const result = await rpc.call("openTab", { scopeKey, ...geometry() });
         dispatch({
@@ -271,14 +372,45 @@ export function FloatingTerminal() {
           snapshot: result.snapshot,
           focusId: result.opened.terminalId,
         });
+        return result.opened.terminalId;
       } catch (error) {
         toast.error(
           error instanceof Error ? error.message : "Could not start a shell",
         );
         void sync();
+        return null;
+      } finally {
+        setStarting(null);
       }
     },
     [rpc, sync, geometry],
+  );
+
+  const pickScope = useCallback(
+    (scopeKey: string) => {
+      const scope =
+        scopes.find((entry) => entry.key === scopeKey) ??
+        (here?.key === scopeKey ? here : undefined);
+      void openTab(scopeKey, scope?.label);
+    },
+    [scopes, here, openTab],
+  );
+
+  /**
+   * A shell where the person is. With nothing to go on — a settings page, a
+   * bb too old to report its route — the picker opens instead of guessing.
+   */
+  const openHere = useCallback(
+    async (where: HostContext): Promise<string | null> => {
+      const scope = await resolveHere(where);
+      if (scope === null) {
+        if (tabsRef.current.length > 0) setNewMenuOpen(true);
+        return null;
+      }
+      setHere(scope);
+      return openTab(scope.key, scope.label);
+    },
+    [resolveHere, openTab],
   );
 
   const closeTab = useCallback(
@@ -324,6 +456,35 @@ export function FloatingTerminal() {
     [rpc, sync, geometry],
   );
 
+  const nameTab = useCallback(
+    (terminalId: string, name: string | null) => {
+      setRenamingId(null);
+      const current = tabsRef.current.find((tab) => tab.terminalId === terminalId);
+      if (current === undefined || current.customName === name) return;
+      dispatch({ type: "named", terminalId, customName: name });
+      void rpc
+        .call("nameTab", { terminalId, name })
+        .then((result) => dispatch({ type: "synced", snapshot: result.snapshot }))
+        .catch((error: unknown) => {
+          toast.error(error instanceof Error ? error.message : "Could not rename the tab");
+          void sync();
+        });
+      activePump()?.focus();
+    },
+    [rpc, sync, activePump],
+  );
+
+  const moveTab = useCallback(
+    (terminalId: string, toIndex: number) => {
+      dispatch({ type: "moved", terminalId, toIndex });
+      void rpc
+        .call("moveTab", { terminalId, toIndex })
+        .then((result) => dispatch({ type: "synced", snapshot: result.snapshot }))
+        .catch(() => void sync());
+    },
+    [rpc, sync],
+  );
+
   useEffect(() => {
     if (sheet) setMaximized(false);
   }, [sheet]);
@@ -331,6 +492,10 @@ export function FloatingTerminal() {
   useEffect(() => {
     setCtrlArmed(false);
   }, [state.activeId]);
+
+  useEffect(() => {
+    windowController.setTabCount(state.tabs.length);
+  }, [state.tabs.length]);
 
   const selectTab = useCallback(
     (terminalId: string) => {
@@ -347,8 +512,6 @@ export function FloatingTerminal() {
    * the window rather than in the pump so it also works with a tab, the picker,
    * or the find bar focused; the pump only declines to eat the key.
    */
-  const tabsRef = useRef(state.tabs);
-  tabsRef.current = state.tabs;
   const cycleTab = useCallback(
     (delta: 1 | -1) => {
       const tabs = tabsRef.current;
@@ -391,6 +554,19 @@ export function FloatingTerminal() {
     void sync();
   }, [open, sync]);
 
+  // "Here" follows the route while the window is open, and is re-asked on
+  // every open: a thread's worktree can be created after the thread is.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void resolveHere(context).then((scope) => {
+      if (!cancelled) setHere(scope);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, context, resolveHere]);
+
   // ------------------------------------------------------------- gestures
 
   useEffect(() => {
@@ -404,6 +580,12 @@ export function FloatingTerminal() {
       getFrame: () => frameRef.current,
       onChange: applyFrame,
       onCommit: commitFrame,
+      onActive: (gesture: "drag" | "resize" | null) => {
+        const node = rootRef.current;
+        if (node === null) return;
+        if (gesture === null) delete node.dataset.gesture;
+        else node.dataset.gesture = gesture;
+      },
     };
     installDrag(header, options, aborter.signal);
     for (const edge of RESIZE_EDGES) {
@@ -463,11 +645,25 @@ export function FloatingTerminal() {
   }, []);
 
   useEffect(() => {
+    const node = rootRef.current;
+    if (!mounted || node === null) return;
+    setSurface(resolveTerminalTheme(node).xterm.background ?? null);
+  }, [mounted, themeVersion]);
+
+  const openHereRef = useRef(openHere);
+  openHereRef.current = openHere;
+
+  useEffect(() => {
     if (!shortcutEnabled) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.ctrlKey && !event.metaKey && !event.altKey && event.key === "`") {
-        event.preventDefault();
+      const chord = windowChord(event);
+      if (chord === null) return;
+      event.preventDefault();
+      if (chord === "toggle") {
         windowController.toggle();
+      } else {
+        windowController.show();
+        void openHereRef.current(hostContext.get());
       }
     };
     window.addEventListener("keydown", onKeyDown, { capture: true });
@@ -480,6 +676,14 @@ export function FloatingTerminal() {
   const onStatus = useCallback(
     (terminalId: string, status: TabStatus, detail: string | null) => {
       dispatch({ type: "status", terminalId, status, detail });
+      const waiting = pendingPaste.current;
+      if (status === "live" && waiting?.terminalId === terminalId) {
+        pendingPaste.current = null;
+        window.setTimeout(() => {
+          const pump = pumps.current.get(terminalId);
+          if (pump !== undefined) pasteInto(pump, waiting.text);
+        }, FIRST_PROMPT_SETTLE_MS);
+      }
     },
     [],
   );
@@ -507,6 +711,10 @@ export function FloatingTerminal() {
     (terminalId: string, title: string | null) => {
       if (lastTitles.current.get(terminalId) === title) return;
       lastTitles.current.set(terminalId, title);
+      // A tab the user named keeps that name; the server ignores the rename
+      // anyway, so do not send it.
+      const tab = tabsRef.current.find((entry) => entry.terminalId === terminalId);
+      if (tab?.customName != null) return;
       const pending = titleTimers.current.get(terminalId);
       if (pending !== undefined) window.clearTimeout(pending);
       titleTimers.current.set(
@@ -538,17 +746,32 @@ export function FloatingTerminal() {
 
   const hide = useCallback(() => windowController.hide(), []);
 
-  const activePump = useCallback((): TerminalPump | null => {
-    const activeId = activeIdRef.current;
-    if (activeId === null) return null;
-    return pumps.current.get(activeId) ?? null;
-  }, []);
-
+  /**
+   * A menu that closes under a pointer leaves focus on nothing at all. Put it
+   * back at the prompt — unless something in the window took it on purpose
+   * (the find field, a rename, the shortcut sheet), or a keyboard close handed
+   * it back to the trigger.
+   */
+  const refocusSoon = useCallback(() => {
+    // On a phone, focusing the terminal raises the software keyboard; closing
+    // a menu is not a request to type.
+    if (sheetRef.current) return;
+    window.setTimeout(() => {
+      const focused = document.activeElement;
+      const root = rootRef.current;
+      if (root !== null && focused !== null && focused !== document.body && root.contains(focused)) {
+        return;
+      }
+      if (windowController.isOpen()) activePump()?.focus();
+    }, 0);
+  }, [activePump]);
 
   // ----------------------------------------------------------- find in tab
   const [findQuery, setFindQuery] = useState("");
   const findQueryRef = useRef("");
   findQueryRef.current = findQuery;
+  const findOptionsRef = useRef<FindOptions>({});
+  findOptionsRef.current = findOptions;
 
   const openFind = useCallback(() => {
     if (activePump()?.searchAvailable() !== true) return;
@@ -573,17 +796,28 @@ export function FloatingTerminal() {
         setFindResults(null);
         return;
       }
-      pump.findNext(query, true);
+      pump.findNext(query, findOptionsRef.current, true);
+    },
+    [activePump],
+  );
+
+  const onFindOptionsChange = useCallback(
+    (options: FindOptions) => {
+      setFindOptions(options);
+      const pump = activePump();
+      if (pump === null || findQueryRef.current === "") return;
+      pump.clearSearch();
+      pump.findNext(findQueryRef.current, options, true);
     },
     [activePump],
   );
 
   const onFindNext = useCallback(() => {
-    activePump()?.findNext(findQueryRef.current);
+    activePump()?.findNext(findQueryRef.current, findOptionsRef.current);
   }, [activePump]);
 
   const onFindPrevious = useCallback(() => {
-    activePump()?.findPrevious(findQueryRef.current);
+    activePump()?.findPrevious(findQueryRef.current, findOptionsRef.current);
   }, [activePump]);
 
   const onSearchResults = useCallback(
@@ -607,17 +841,158 @@ export function FloatingTerminal() {
   }, [state.activeId]);
 
   const onScrollState = useCallback(
-    (terminalId: string, tabAtBottom: boolean) => {
-      if (terminalId === activeIdRef.current) setAtBottom(tabAtBottom);
+    (terminalId: string, tabAtBottom: boolean, tabNewOutput: boolean) => {
+      if (terminalId !== activeIdRef.current) return;
+      setAtBottom(tabAtBottom);
+      setNewOutput(tabNewOutput);
     },
     [],
   );
 
-  // Switching tabs: the pill state belongs to the new tab, and until its pump
-  // reports otherwise the safe assumption is "at the prompt".
+  const onActivity = useCallback(
+    (terminalId: string, activity: "output" | "bell") => {
+      // The window being hidden is "not looking" too, for the bell at least.
+      if (terminalId === activeIdRef.current && windowController.isOpen()) return;
+      dispatch({ type: "activity", terminalId, activity });
+    },
+    [],
+  );
+
+  const onSelection = useCallback((terminalId: string, text: string) => {
+    if (terminalId === activeIdRef.current) setSelection(text);
+  }, []);
+
+  const onContextMenu = useCallback((terminalId: string, x: number, y: number) => {
+    // The sheet has no right-click menu of its own; leave the platform's.
+    if (sheetRef.current || terminalId !== activeIdRef.current) return false;
+    const body = bodyRef.current;
+    if (body === null) return false;
+    const rect = body.getBoundingClientRect();
+    setMenuAt({ x: x - rect.left, y: y - rect.top });
+    return true;
+  }, []);
+
+  // Switching tabs: the pill and selection state belong to the new tab, and
+  // until its pump reports otherwise the safe assumption is "at the prompt".
   useEffect(() => {
     setAtBottom(true);
+    setNewOutput(false);
+    setSelection("");
+    setMenuAt(null);
   }, [state.activeId]);
+
+  // ------------------------------------------------------- text in and out
+
+  /**
+   * Hand text to the agent: into the composer of the thread in view, fenced,
+   * with focus there so the question can be typed straight after it.
+   */
+  const sendToAgent = useCallback((text: string) => {
+    const body = text.replace(/\s+$/, "");
+    if (body === "") return;
+    const composer = composerBridge.pick(hostContext.get().threadId);
+    if (composer === null) {
+      copyText(body);
+      toast("Copied — there is no composer on screen to send it to.");
+      return;
+    }
+    composer.insert(quoteForAgent(body), { at: "end", block: true });
+    composer.focus();
+    // A sheet covers the composer it just wrote into.
+    if (sheetRef.current) windowController.hide();
+    toast.success("Added to the composer");
+  }, []);
+
+  const sendActiveToAgent = useCallback(() => {
+    const pump = activePump();
+    if (pump === null) return;
+    const picked = pump.getSelection();
+    const text =
+      picked.trim() !== ""
+        ? picked
+        : pump.allText().split("\n").slice(-AGENT_TAIL_LINES).join("\n");
+    pump.clearSelection();
+    sendToAgent(text);
+  }, [activePump, sendToAgent]);
+
+  const copyAll = useCallback(() => {
+    const text = activePump()?.allText() ?? "";
+    if (text === "") {
+      toast("Nothing to copy yet.");
+      return;
+    }
+    copyText(text);
+    toast.success("Copied the whole scrollback");
+  }, [activePump]);
+
+  const pasteFromClipboard = useCallback(() => {
+    const pump = activePump();
+    if (pump === null) return;
+    void navigator.clipboard
+      ?.readText()
+      .then((text) => {
+        if (text !== "") pump.paste(text);
+        pump.focus();
+      })
+      .catch(() => {
+        toast.error("Clipboard is not available here.");
+      });
+  }, [activePump]);
+
+  const clearActive = useCallback(() => {
+    const pump = activePump();
+    pump?.clear();
+    pump?.focus();
+  }, [activePump]);
+
+  // -------------------------------------------------------- commands from bb
+
+  const handleCommand = useCallback(
+    (command: WindowCommand) => {
+      switch (command.kind) {
+        case "new-here":
+          void openHere(command.context);
+          return;
+        case "pick":
+          // The empty state is already the picker; otherwise open the + menu
+          // once the window has painted, so it has an anchor to drop from.
+          if (tabsRef.current.length > 0) {
+            window.requestAnimationFrame(() => setNewMenuOpen(true));
+          }
+          return;
+        case "paste": {
+          const pump = activePump();
+          if (pump !== null) {
+            pasteInto(pump, command.text);
+            return;
+          }
+          void openHere(command.context).then((terminalId) => {
+            if (terminalId === null) {
+              copyText(command.text);
+              toast("Copied — pick a directory and paste it into the new shell.");
+              return;
+            }
+            pendingPaste.current = { terminalId, text: command.text };
+          });
+          return;
+        }
+        case "restart":
+          if (activeIdRef.current !== null) void restartTab(activeIdRef.current);
+          return;
+        case "clear":
+          clearActive();
+          return;
+        case "find":
+          window.requestAnimationFrame(openFind);
+          return;
+      }
+    },
+    [openHere, activePump, restartTab, clearActive, openFind],
+  );
+
+  useEffect(() => windowController.setHandler(handleCommand), [handleCommand]);
+
+  // ------------------------------------------------------------ key toolbar
 
   const onToolbarKey = useCallback(
     (key: ToolbarKey) => {
@@ -644,32 +1019,42 @@ export function FloatingTerminal() {
             openFind();
             return;
           }
-          if (key.id === "paste") {
-            void navigator.clipboard
-              ?.readText()
-              .then((text) => {
-                if (text !== "") pump.send(text);
-              })
-              .catch(() => {
-                toast.error("Clipboard is not available here.");
-              });
-          }
+          if (key.id === "paste") pasteFromClipboard();
           return;
       }
     },
-    [activePump, ctrlArmed, openFind],
+    [activePump, ctrlArmed, openFind, pasteFromClipboard],
   );
 
-  const onCtrlArmed = useCallback((armed: boolean) => setCtrlArmed(armed), []);
+  const onCtrlArmed = useCallback((value: boolean) => setCtrlArmed(value), []);
 
+  const onNewHereRequested = useCallback(() => {
+    void openHereRef.current(hostContext.get());
+  }, []);
+
+  const onFontSize = useCallback((next: number | null) => {
+    const value = next === null ? null : clampFontSize(next);
+    setFontOverride(value);
+    saveFontOverride(value);
+  }, []);
+
+  const onSnap = useCallback(
+    (target: SnapTarget) => {
+      setMaximized(false);
+      commitFrame(snapFrame(target));
+    },
+    [commitFrame],
+  );
 
   // A bare ~ means nothing once there is more than one machine.
   const showHosts = new Set(scopes.map((scope) => scope.hostName)).size > 1;
+  const activeTab = state.tabs.find((tab) => tab.terminalId === state.activeId) ?? null;
+  const hasSelection = selection.trim() !== "";
 
   if (!mounted) return null;
 
   return (
-    <TooltipProvider delayDuration={400}>
+    <TooltipProvider delayDuration={400} skipDelayDuration={250}>
       {/* Only the sheet gets a scrim. The desktop window is deliberately
           non-modal — bb stays usable behind it — but at this width the sheet
           covers nearly everything, so a blurred backdrop is what makes it read
@@ -692,111 +1077,231 @@ export function FloatingTerminal() {
         aria-hidden={!open}
         data-state={open && armed ? "open" : "closed"}
         data-layout={sheet ? "sheet" : "window"}
+        data-maximized={maximized ? "" : undefined}
         onKeyDown={onWindowKeyDown}
         // Stacking lives in styles.css, where the backdrop and window are kept in
         // one place relative to bb's own layers.
-        className="bb-ft-window fixed flex flex-col overflow-hidden rounded-xl border border-border bg-card text-card-foreground shadow-2xl"
+        className="bb-ft-window fixed"
       >
-        <div
-          ref={headerRef}
-          data-bb-ft-handle=""
-          // The title-bar convention from every desktop OS. Interactive
-          // children (tabs, buttons, the picker) stop the double-click the
-          // same way they stop the drag.
-          onDoubleClick={(event) => {
-            if (sheet) return;
-            const target = event.target as HTMLElement | null;
-            if (target?.closest("[data-no-drag]") != null) return;
-            setMaximized((value) => !value);
-          }}
-        >
-          <TabBar
-            tabs={state.tabs}
-            activeId={state.activeId}
-            scopes={scopes}
-            recentScopeKeys={recentScopeKeys}
-            showHosts={showHosts}
-            maximize={
-              sheet
-                ? null
-                : {
-                    on: maximized,
-                    toggle: () => setMaximized((value) => !value),
-                  }
-            }
-            onSelect={selectTab}
-            onClose={(terminalId) => void closeTab(terminalId)}
-            onNewTab={(scopeKey) => void openTab(scopeKey)}
-            onRestart={() => {
-              if (state.activeId !== null) void restartTab(state.activeId);
+        <div className="bb-ft-surface flex size-full flex-col overflow-hidden text-card-foreground">
+          <div
+            ref={headerRef}
+            data-bb-ft-handle=""
+            // The title-bar convention from every desktop OS. Interactive
+            // children (tabs, buttons, the picker) stop the double-click the
+            // same way they stop the drag.
+            onDoubleClick={(event) => {
+              if (sheet) return;
+              const target = event.target as HTMLElement | null;
+              if (target?.closest("[data-no-drag]") != null) return;
+              setMaximized((value) => !value);
             }}
-            onHide={hide}
-          />
-        </div>
-
-        <div className="relative min-h-0 flex-1 bg-card px-2 pb-1 pt-2">
-          {state.tabs.map((tab) => (
-            <TerminalView
-              key={tab.terminalId}
-              rpc={rpc}
-              terminalId={tab.terminalId}
-              visible={open && tab.terminalId === state.activeId}
-              fontSize={fontSize}
-              themeVersion={themeVersion}
-              fitVersion={fitVersion}
-              onStatus={onStatus}
-              onTitle={onTitle}
-              onCtrlArmed={onCtrlArmed}
-              onFindRequested={openFind}
-              onScrollState={onScrollState}
-              onSearchResults={onSearchResults}
-              onRequestRestart={onRequestRestart}
-              onToggleRequested={hide}
-              onPumpReady={onPumpReady}
-              onPumpGone={onPumpGone}
-            />
-          ))}
-          {findOpen && state.tabs.length > 0 ? (
-            <FindBar
-              query={findQuery}
-              results={findResults}
-              onQueryChange={onFindQueryChange}
-              onNext={onFindNext}
-              onPrevious={onFindPrevious}
-              onClose={closeFind}
-            />
-          ) : null}
-
-          {/* Parked in history while output may still be arriving below. */}
-          {!atBottom && state.tabs.length > 0 ? (
-            <button
-              type="button"
-              className="bb-ft-pill"
-              onClick={() => {
-                activePump()?.scrollToBottom();
-                activePump()?.focus();
-              }}
-            >
-              <Icon name="ChevronsDown" className="size-3.5" aria-hidden="true" />
-              Latest
-            </button>
-          ) : null}
-
-          {state.tabs.length === 0 ? (
-            <EmptyState
+          >
+            <TabBar
+              tabs={state.tabs}
+              activeId={state.activeId}
               scopes={scopes}
               recentScopeKeys={recentScopeKeys}
+              here={here}
               showHosts={showHosts}
-              onPick={(scopeKey) => void openTab(scopeKey)}
+              maximize={
+                sheet
+                  ? null
+                  : {
+                      on: maximized,
+                      toggle: () => setMaximized((value) => !value),
+                    }
+              }
+              newMenuOpen={newMenuOpen}
+              onNewMenuOpenChange={(next) => {
+                setNewMenuOpen(next);
+                if (next) void resolveHere(hostContext.get()).then(setHere);
+                else refocusSoon();
+              }}
+              renamingId={renamingId}
+              onSelect={selectTab}
+              onClose={(terminalId) => void closeTab(terminalId)}
+              onNewTab={pickScope}
+              onStartRename={(terminalId) => {
+                selectTab(terminalId);
+                setRenamingId(terminalId);
+              }}
+              onRename={nameTab}
+              onCancelRename={() => {
+                setRenamingId(null);
+                activePump()?.focus();
+              }}
+              onMove={moveTab}
+              onHide={hide}
+              actions={
+                <WindowMenu
+                  hasTab={activeTab !== null}
+                  onRename={() => {
+                    if (activeTab !== null) setRenamingId(activeTab.terminalId);
+                  }}
+                  onRestart={() => {
+                    if (state.activeId !== null) void restartTab(state.activeId);
+                  }}
+                  onClear={clearActive}
+                  onFind={openFind}
+                  onCopyAll={copyAll}
+                  onSendToAgent={composerAvailable ? sendActiveToAgent : null}
+                  fontSize={fontSize}
+                  fontCustomised={fontOverride !== null}
+                  onFontSize={onFontSize}
+                  layout={
+                    sheet
+                      ? null
+                      : {
+                          maximized,
+                          onToggleMaximize: () => setMaximized((value) => !value),
+                          onSnap,
+                        }
+                  }
+                  onShortcuts={() => setShortcutsOpen(true)}
+                  onClosed={refocusSoon}
+                />
+              }
             />
+          </div>
+
+          <div
+            ref={bodyRef}
+            className="bb-ft-body relative min-h-0 flex-1"
+            style={surface === null ? undefined : { backgroundColor: surface }}
+          >
+            {state.tabs.map((tab) => (
+              <TerminalView
+                key={tab.terminalId}
+                rpc={rpc}
+                terminalId={tab.terminalId}
+                mode={
+                  !open
+                    ? "paused"
+                    : tab.terminalId === state.activeId
+                      ? "active"
+                      : "background"
+                }
+                fontSize={fontSize}
+                themeVersion={themeVersion}
+                fitVersion={fitVersion}
+                onStatus={onStatus}
+                onTitle={onTitle}
+                onCtrlArmed={onCtrlArmed}
+                onFindRequested={openFind}
+                onScrollState={onScrollState}
+                onSearchResults={onSearchResults}
+                onActivity={onActivity}
+                onSelection={onSelection}
+                onContextMenu={onContextMenu}
+                onRequestRestart={onRequestRestart}
+                onToggleRequested={hide}
+                onNewHereRequested={onNewHereRequested}
+                copyText={copyText}
+                onPumpReady={onPumpReady}
+                onPumpGone={onPumpGone}
+              />
+            ))}
+            {findOpen && state.tabs.length > 0 ? (
+              <FindBar
+                query={findQuery}
+                options={findOptions}
+                results={findResults}
+                onQueryChange={onFindQueryChange}
+                onOptionsChange={onFindOptionsChange}
+                onNext={onFindNext}
+                onPrevious={onFindPrevious}
+                onClose={closeFind}
+              />
+            ) : null}
+
+            {state.tabs.length > 0 ? (
+              <PillBar>
+                {hasSelection ? (
+                  <>
+                    <Pill
+                      icon="Copy"
+                      onClick={() => {
+                        if (activePump()?.copySelection() === true) toast.success("Copied");
+                      }}
+                    >
+                      Copy
+                    </Pill>
+                    {composerAvailable ? (
+                      <Pill icon="Sent" tone="accent" onClick={sendActiveToAgent}>
+                        Ask the agent
+                      </Pill>
+                    ) : null}
+                  </>
+                ) : !atBottom ? (
+                  // Parked in history while output may still be arriving below.
+                  <Pill
+                    icon="ChevronsDown"
+                    tone={newOutput ? "accent" : undefined}
+                    onClick={() => {
+                      activePump()?.scrollToBottom();
+                      activePump()?.focus();
+                    }}
+                  >
+                    {newOutput ? "New output" : "Latest"}
+                  </Pill>
+                ) : null}
+                {starting !== null ? (
+                  <span className="bb-ft-pill bb-ft-pill-quiet" aria-live="polite">
+                    <span className="bb-ft-spinner bb-ft-spinner-small" aria-hidden="true" />
+                    Starting {starting}…
+                  </span>
+                ) : null}
+              </PillBar>
+            ) : null}
+
+            {state.tabs.length === 0 ? (
+              <EmptyState
+                scopes={scopes}
+                recentScopeKeys={recentScopeKeys}
+                here={here}
+                showHosts={showHosts}
+                starting={starting}
+                onPick={pickScope}
+              />
+            ) : null}
+
+            {state.tabs.length > 0 && !sheet ? (
+              <TerminalMenu
+                at={menuAt}
+                hasSelection={hasSelection}
+                canSendToAgent={composerAvailable}
+                onOpenChange={(next) => {
+                  if (!next) {
+                    setMenuAt(null);
+                    refocusSoon();
+                  }
+                }}
+                onCopy={() => void activePump()?.copySelection()}
+                onPaste={pasteFromClipboard}
+                onSelectAll={() => activePump()?.selectAll()}
+                onSendToAgent={sendActiveToAgent}
+                onFind={openFind}
+                onClear={clearActive}
+              />
+            ) : null}
+
+            {shortcutsOpen ? (
+              <ShortcutsPanel
+                onClose={() => {
+                  setShortcutsOpen(false);
+                  activePump()?.focus();
+                }}
+              />
+            ) : null}
+          </div>
+
+          {/* Only where the keys are actually missing, and only once there is a
+              shell to send them to. */}
+          {sheet && state.tabs.length > 0 ? (
+            <KeyToolbar ctrlArmed={ctrlArmed} onKey={onToolbarKey} />
           ) : null}
         </div>
-
-        {/* Only where the keys are actually missing, and only once there is a
-            shell to send them to. */}
-        {sheet && state.tabs.length > 0 ? (
-          <KeyToolbar ctrlArmed={ctrlArmed} onKey={onToolbarKey} />
-        ) : null}
 
         {sheet || maximized
           ? null
@@ -807,7 +1312,8 @@ export function FloatingTerminal() {
                   if (node === null) edgeRefs.current.delete(edge);
                   else edgeRefs.current.set(edge, node);
                 }}
-                className={EDGE_CLASS[edge] ?? ""}
+                className="bb-ft-edge"
+                data-bb-ft-edge={edge}
                 aria-hidden="true"
               />
             ))}
@@ -815,3 +1321,22 @@ export function FloatingTerminal() {
     </TooltipProvider>
   );
 }
+
+/**
+ * Type text in at the prompt. A shell that has not asked for bracketed paste
+ * would run a multi-line paste line by line as it lands, so that case goes to
+ * the clipboard instead and the person pastes it when they are ready.
+ */
+function pasteInto(pump: TerminalPump, text: string): void {
+  if (text.includes("\n") && !pump.bracketedPaste()) {
+    copyText(text);
+    toast("Copied instead of pasted", {
+      description:
+        "This shell would run a multi-line paste line by line. Paste it yourself when you are ready.",
+    });
+    return;
+  }
+  pump.paste(text);
+  pump.focus();
+}
+

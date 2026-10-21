@@ -21,7 +21,14 @@ footer next to Settings the moment it lands.
 
 - **Tabs, one shell each.** Every tab is a real PTY on a real machine, not a
   log view. `+` opens another one in any project checkout or any machine's home
-  directory.
+  directory — and first in that list, **Here**: the worktree of the thread you
+  are looking at, or the project's checkout. `` Ctrl+Shift+` `` opens a shell
+  there without the menu.
+- **Tabs behave like browser tabs.** Drag one to reorder it, double-click (or
+  F2) to give it a name of its own, middle-click to close it, and
+  `Cmd/Ctrl+Shift+[` and `]` to step through them. A tab you are not looking at
+  gets a dot when it prints something, and a ringed one when it rings the bell —
+  so `make; tput bel` in one tab tells you when to come back.
 - **Multi-machine.** Every connected bb machine is offered, so a tab can be a
   shell on a remote box. Paths and tab titles keep the machine visible once you
   have more than one, and an offline machine says so instead of failing on click.
@@ -29,28 +36,58 @@ footer next to Settings the moment it lands.
   closing the window, reloading the app, or restarting bb reattaches to the
   same shells with their scrollback intact. A shell that died while you were
   away is dropped rather than left as a dead row.
-- **Drag it anywhere, resize from any edge.** The position is remembered. It
-  rests in the bottom-left corner with the same inset on every edge, which is
-  also the origin the open animation grows from, so it reads as coming out of
-  the button that opened it.
-- **Restart in place.** The restart button kills a tab's shell and starts a
-  fresh one in the same directory, keeping the tab where it is.
+- **Drag it anywhere, resize from any edge.** The position is remembered, and
+  the whole window stays inside bb — on a narrower screen, or an iPad turned to
+  portrait, it comes back on screen rather than with its hide button off the
+  edge. It rests in the bottom-left corner with the same inset on every edge,
+  which is also the origin the open animation grows from, so it reads as coming
+  out of the button that opened it.
+- **Restart in place.** Restart, in the `⋯` menu, kills a tab's shell and
+  starts a fresh one in the same directory, keeping the tab — and its name —
+  where it is. It used to be a button beside hide; a one-click way to kill a
+  running dev server belongs one menu deeper.
 - **Find in scrollback.** `Cmd/Ctrl+F` inside the terminal (or the `find` key
   on the mobile bar) opens a small find bar: matches highlighted, counted, and
-  walked with Enter / Shift+Enter. Escape puts focus straight back at the
-  prompt.
-- **Maximize when you mean it.** A button — or double-clicking the tab bar,
-  the way every desktop titlebar works — grows the window to the viewport
-  minus a sliver, and restores to exactly where it was. Middle-click closes a
-  tab, as in every browser, and `Cmd/Ctrl+Shift+[` and `]` step through the
-  tabs the way they do in one.
-- **Never lose the prompt.** Scroll up into history and a small "Latest" pill
-  appears; new output can land below without you noticing otherwise. It stays
-  out of the way in `vim` and `less`, where there is no scrollback to lose.
+  walked with Enter / Shift+Enter, with switches for case and regular
+  expressions. Escape puts focus straight back at the prompt.
+- **Lay it out in one click.** Maximize — the button, or double-clicking the
+  title bar — grows the window to the viewport minus a sliver and restores it
+  exactly. The `⋯` menu also snaps it to the left or right half, or to a
+  full-width strip along the bottom the way an editor's terminal panel sits.
+- **Never lose the prompt.** Scroll up into history and a small pill appears —
+  "Latest", or "New output" once something has landed below you. It stays out
+  of the way in `vim` and `less`, where there is no scrollback to lose.
+- **Right-click for the rest.** Copy, paste, select all, find, clear. bb's
+  desktop app shows no context menu of its own, so before this a right-click
+  in the terminal did nothing at all.
+- **Text size per device.** `⋯` → Text size steps it up and down, remembered
+  on that device only: the size that reads well on a laptop is not the one
+  that reads well on a phone.
 - **The same terminal bb runs.** WebGL rendering, Unicode 11 widths, clickable
   links, bb's Nerd Font stack, 10 000 lines of scrollback — so a powerline
   prompt, a box-drawing TUI, and an emoji all land the same way they do in bb's
   own terminal panel.
+
+### It works with the agent, not beside it
+
+The terminal is next to an agent for a reason, so text crosses between them:
+
+- **Paste into terminal.** Every chat message, and the menu that appears when
+  you select text in one, has a *Paste into terminal* action. On a selection it
+  takes the selection; on a whole message it takes the first shell code block.
+  The command lands at the prompt and waits for Enter — an agent's suggestion
+  is something to read before it runs. With no shell open it starts one in the
+  thread's worktree first. A multi-line command goes to the clipboard instead
+  when the shell has not turned on bracketed paste, which is what stops it from
+  running line by line as it lands.
+- **Ask the agent.** Select output in the terminal and a pill offers to send it
+  to the thread's composer, fenced, with the caret placed after it — the build
+  error becomes a question in one click. Without a selection, the `⋯` menu and
+  the right-click menu send the recent tail of the scrollback.
+- **Palette commands.** *Floating Terminal: New shell here*, *New shell in…*,
+  *Show or hide*, *Find*, *Clear* and *Restart* are in bb's quick palette
+  (`Cmd/Ctrl+Shift+P`), and any of them can be given a shortcut in Settings →
+  Keyboard.
 
 ### It asks where, not what
 
@@ -59,9 +96,10 @@ footer next to Settings the moment it lands.
 *With no shell running, the window offers directories rather than a blank pane.*
 
 The order is the design. A flat dump of every project and machine is a filing
-cabinet; putting the directories you actually opened at the top makes the list
-answer "where do you want to work". Once there are enough directories to stop
-being scannable, the list grows a search field.
+cabinet; putting the directory you are looking at first, and the ones you
+actually opened after it, makes the list answer "where do you want to work".
+Once there are enough directories to stop being scannable, the list grows a
+search field.
 
 ![The + menu offering the same list over a running shell](docs/media/new-tab.png)
 
@@ -134,18 +172,41 @@ itself, so `bb terminal list` shows the same name.
 
 ## Settings
 
-**bb → Extensions → Floating Terminal**: font size, and whether `` Ctrl+` ``
-toggles the window.
+**bb → Extensions → Floating Terminal**: the default font size, and whether
+`` Ctrl+` `` / `` Ctrl+Shift+` `` are bound. The `⋯` menu overrides the size on
+one device. Palette commands take shortcuts in **Settings → Keyboard**.
+
+## Keyboard
+
+| Keys | Does |
+| --- | --- |
+| `` Ctrl+` `` | Show or hide the window — shells keep running |
+| `` Ctrl+Shift+` `` | New shell in the thread's worktree (or the project) |
+| `Cmd/Ctrl+Shift+[` / `]` | Previous / next tab |
+| `Cmd/Ctrl+F` | Find in scrollback |
+| `Cmd+K` | Clear scrollback (macOS) |
+| `Cmd/Ctrl+C` | Copy the selection; with nothing selected it is `^C` |
+| `F2`, double-click a tab | Rename it |
+| Middle-click a tab | Close it |
+| Double-click the title bar | Maximize or restore |
+
+Both backtick chords match the physical key left of `1`, so they work on
+layouts where that key is not a backtick (a cedilla on Croatian, a caret on
+German).
 
 ## How it fits together
 
 ```
-app.tsx                       contentScript (React root) + sidebarFooterAction
-├── lib/controller.ts         external store: who opened/closed the window
+app.tsx                       contentScript (React root), sidebar button, palette
+│                             commands, the message action, two context overlays
+├── lib/controller.ts         external store + command bus; route and composers
 └── components/
     ├── floating-terminal.tsx the window — geometry, server sync, layout
     ├── shell-picker.tsx      the directory list, shared by both entry points
-    ├── tab-bar.tsx           the tab strip
+    ├── tab-bar.tsx           the tab strip: rename, reorder, activity
+    ├── window-menu.tsx       the ⋯ menu
+    ├── terminal-overlays.tsx right-click menu, shortcut sheet, pills
+    ├── find-bar.tsx          find in scrollback
     └── terminal-view.tsx     one tab's terminal; owns a TerminalPump
 
 server.ts                     RPC over bb.sdk.terminals; tab list in kv
@@ -159,21 +220,37 @@ lib/scopes.ts                 which directories are offered, and in what order
 lib/frame.ts                  drag, resize, clamping, persistence
 lib/theme.ts                  bb's oklch tokens -> an xterm palette
 lib/rpc.ts                    fetch twin of the useRpc hook
+lib/commands.ts               message text -> a command; output -> the composer
+lib/host.ts                   feature-detected host APIs (bb's clipboard)
+lib/prefs.ts                  the per-device text size
 fonts/nerd-symbols.css        generated: the Nerd Font symbol set, inlined
 ```
 
-Three things are worth knowing before changing it:
+Four things are worth knowing before changing it:
 
-**There is no bb React context.** A content script mounts the root into
-`document.body`, outside bb's component tree, so `useRpc`, `useSettings`, and
-`useBbContext` are unavailable. `lib/rpc.ts` speaks the plugin RPC wire format
-(`POST /api/v1/plugins/<id>/rpc/<method>`) directly and is typed off the same
-`rpcContract`.
+**There is no bb React context in the window.** A content script mounts the
+root into `document.body`, outside bb's component tree, so `useRpc`,
+`useSettings`, and `useBbContext` are unavailable there. `lib/rpc.ts` speaks the
+plugin RPC wire format (`POST /api/v1/plugins/<id>/rpc/<method>`) directly and
+is typed off the same `rpcContract`. What the window needs from bb's context —
+which thread is in view, which composers are on screen — two invisible app
+overlays read and report into `lib/controller.ts`. Everything newer than the
+vendored SDK types is feature-detected, so on an older bb those parts are
+simply absent.
+
+**Everything the window portals must stack above it.** Menus, the phone
+drawer and tooltips render outside the window, at the end of `<body>`. The
+window sits at z-55 to clear bb's own chrome, so the vendored overlays sit at
+z-60 — at bb's default z-50 the `+` menu opened invisibly *behind* the window.
+Hit-testing will not catch a regression: while a modal menu is open bb turns
+pointer events off on everything else, so `elementFromPoint` sees straight
+through the window. Compare z-indices, or look at a screenshot.
 
 **Output is polled, not streamed.** bb exposes terminal output to plugins as a
 sequence-numbered buffer, so `lib/pump.ts` polls: 40 ms while bytes are moving,
-backing off to 320 ms when the shell is quiet, and stopping entirely for tabs
-that are not visible. A hidden tab costs nothing and is caught up on return.
+backing off to 320 ms when the shell is quiet. Tabs behind the active one poll
+every 2 s, enough to badge them when they print or ring the bell, and nothing
+polls while the window is hidden.
 
 **The server owns the tab list; the client owns status and focus.** Every
 response carrying tab state is a `{ revision, tabs, activeTabId }` snapshot, and
@@ -212,14 +289,18 @@ node tests/mobile-e2e.mjs webkit "iPhone 14 Pro"
 It drives a running bb (`BB_APP_URL`, default `http://localhost:38886`) across
 Galaxy S9+, iPhone 14 Pro, Pixel 7, the same iPhone under WebKit — the engine
 iOS Safari uses — and an iPad, which is over the compact breakpoint and must
-stay a window. 34 checks: layout and insets, stacking above bb's chrome, the
-directory list, the key bar and its latch, touch scrolling in both buffers,
-momentum, the bundled glyphs, keyboard-aware height, and persistence across a
-hide and reopen.
+stay a window. 35 checks: layout and insets, stacking above bb's chrome, the
+`+` menu painting above the window, the directory list, the key bar and its
+latch, touch scrolling in both buffers, momentum, the bundled glyphs,
+keyboard-aware height, and persistence across a hide and reopen.
 
-It opens and closes real shells in whichever bb it points at, and asserts it
-leaves none behind. Touch gestures go over CDP, so on WebKit those checks report
-SKIP rather than passing silently.
+It opens one real shell in whichever bb it points at, types only into that one,
+closes only that one, and asserts it leaves none behind — so it is safe to run
+against the bb you work in. With shells already open, the empty-state checks
+report SKIP rather than closing yours to earn them. Touch gestures go over CDP,
+so on WebKit those checks report SKIP rather than passing silently.
+`PW_CHROMIUM` / `PW_WEBKIT` point it at a browser build when the one Playwright
+expects is not the one installed.
 
 `components/ui/` is vendored source you own (the shadcn model) — edit it
 freely, it never updates out from under you. Add more from bb's registry, which

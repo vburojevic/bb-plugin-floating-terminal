@@ -10,6 +10,7 @@ import {
   isTabCycleKey,
   tabCycleDirection,
   TOOLBAR_KEYS,
+  windowChord,
 } from "./keys";
 
 describe("controlCode", () => {
@@ -114,3 +115,23 @@ describe("isTabCycleKey", () => {
     expect(tabCycleDirection({ key: "a", code: "KeyA" })).toBeNull();
   });
 });
+
+describe("windowChord", () => {
+  const base = { key: "`", code: "Backquote", metaKey: false, ctrlKey: true, shiftKey: false, altKey: false };
+
+  it("toggles on Ctrl+` and opens a shell on Ctrl+Shift+`", () => {
+    expect(windowChord(base)).toBe("toggle");
+    expect(windowChord({ ...base, key: "~", shiftKey: true })).toBe("new-here");
+  });
+
+  it("matches the physical key on layouts without a backtick there", () => {
+    expect(windowChord({ ...base, key: "¸" })).toBe("toggle");
+  });
+
+  it("leaves other chords alone", () => {
+    expect(windowChord({ ...base, ctrlKey: false })).toBeNull();
+    expect(windowChord({ ...base, metaKey: true })).toBeNull();
+    expect(windowChord({ ...base, key: "1", code: "Digit1" })).toBeNull();
+  });
+});
+

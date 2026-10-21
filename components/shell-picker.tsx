@@ -19,6 +19,8 @@ import { cn } from "@/lib/utils";
 export interface ShellPickerProps {
   scopes: ScopeOption[];
   recentScopeKeys: string[];
+  /** The thread's worktree or the project in view; offered first. */
+  here?: ScopeOption | null;
   /** True when more than one machine is connected, so paths need qualifying. */
   showHosts: boolean;
   onPick: (scopeKey: string) => void;
@@ -36,12 +38,13 @@ const SEARCHABLE_FROM = 7;
 export function ShellPicker({
   scopes,
   recentScopeKeys,
+  here = null,
   showHosts,
   onPick,
   fill = false,
   className,
 }: ShellPickerProps) {
-  const sections = buildSections(scopes, recentScopeKeys);
+  const sections = buildSections(scopes, recentScopeKeys, here);
   const searchable = scopes.length >= SEARCHABLE_FROM;
 
   return (
@@ -76,28 +79,30 @@ export function ShellPicker({
                   aria-hidden="true"
                 />
                 <span className="flex min-w-0 flex-1 flex-col">
-                  <span className="truncate">{scope.label}</span>
-                  <span className="truncate font-mono text-xs text-muted-foreground">
-                    {shortenPath(scope.detail)}
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <span className="truncate">{scope.label}</span>
+                    {scope.kind === "worktree" ? (
+                      <span className="bb-ft-chip shrink-0">worktree</span>
+                    ) : null}
+                  </span>
+                  <span className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+                    <span className="min-w-0 flex-1 truncate font-mono">
+                      {shortenPath(scope.detail)}
+                    </span>
+                    {/* The machine is metadata, not part of the path, and not
+                        worth the name's width either: beside the label it took
+                        half the row and cut every project to "bb-plugin-flo…".
+                        On the path's line it costs only path, which already
+                        elides its least useful end. The cap lives in styles.css
+                        for the reason given there. */}
+                    {showHosts || !scope.online ? (
+                      <span data-bb-ft-host="" className="shrink-0 truncate opacity-80">
+                        {showHosts ? scope.hostName : null}
+                        {!scope.online ? (showHosts ? " · offline" : "offline") : null}
+                      </span>
+                    ) : null}
                   </span>
                 </span>
-                {/* The machine is metadata, not part of the path. Inline, it
-                    put the same 19 characters in front of every row and made
-                    the list unscannable. */}
-                {showHosts || !scope.online ? (
-                  // The width cap lives in styles.css for the same reason as
-                  // the list cap above. At sheet width a long machine name took
-                  // half the row and truncated every project to
-                  // "bb-plugin-co…"; the row never overflows, so the label just
-                  // got whatever was left and flex shrinking never kicked in.
-                  <span
-                    data-bb-ft-host=""
-                    className="shrink-0 self-center truncate text-xs text-muted-foreground"
-                  >
-                    {showHosts ? scope.hostName : null}
-                    {!scope.online ? (showHosts ? " · offline" : "offline") : null}
-                  </span>
-                ) : null}
               </CommandItem>
             ))}
           </CommandGroup>

@@ -6,7 +6,14 @@
 // width comes back 393px wide, so the sheet has to keep the stored frame away
 // from it entirely.
 import { afterEach, describe, expect, it } from "vitest";
-import { clampFrame, defaultFrame, loadFrame, saveFrame } from "./frame";
+import {
+  clampFrame,
+  defaultFrame,
+  loadFrame,
+  resizeFrame,
+  saveFrame,
+  snapFrame,
+} from "./frame";
 
 interface FakeStorage {
   getItem(key: string): string | null;
@@ -78,23 +85,26 @@ describe("clampFrame", () => {
     expect(clampFrame(frame)).toEqual(frame);
   });
 
-  it("never lets the window be dragged out of reach", () => {
+  it("keeps the whole window on screen, title-bar controls included", () => {
     stubWindow(1440, 900);
-    // Far off to the left: enough of it has to stay grabbable to drag back.
-    expect(clampFrame({ x: -5000, y: 10, width: 760, height: 460 }).x).toBe(
-      140 - 760,
-    );
+    // The hide, restart and maximize buttons live on the right edge of the
+    // title bar; a window allowed to hang off that side loses them.
     expect(clampFrame({ x: 9000, y: 10, width: 760, height: 460 }).x).toBe(
-      1440 - 140,
+      1440 - 760,
+    );
+    expect(clampFrame({ x: -5000, y: 10, width: 760, height: 460 }).x).toBe(0);
+    expect(clampFrame({ x: 40, y: -300, width: 760, height: 460 }).y).toBe(0);
+    expect(clampFrame({ x: 40, y: 5000, width: 760, height: 460 }).y).toBe(
+      900 - 460,
     );
   });
 
-  it("never lets the header — the only drag handle — leave the viewport", () => {
-    stubWindow(1440, 900);
-    expect(clampFrame({ x: 40, y: -300, width: 760, height: 460 }).y).toBe(0);
-    expect(clampFrame({ x: 40, y: 5000, width: 760, height: 460 }).y).toBe(
-      900 - 40,
-    );
+  it("pulls a window placed on a wide screen back inside a narrow one", () => {
+    // iPad landscape -> portrait: the frame was authored at 1194px wide.
+    stubWindow(834, 1194);
+    const frame = clampFrame({ x: 400, y: 200, width: 760, height: 460 });
+    expect(frame.x + frame.width).toBeLessThanOrEqual(834);
+    expect(frame.width).toBe(760);
   });
 
   it("holds a frame to the minimum size rather than letting it vanish", () => {
@@ -134,5 +144,68 @@ describe("loadFrame", () => {
     ]);
     stubWindow(1440, 900, store);
     expect(loadFrame()).toEqual(defaultFrame());
+  });
+});
+
+describe("resizeFrame", () => {
+  const viewport = { width: 1440, height: 900 };
+  const start = { x: 100, y: 300, width: 760, height: 460 };
+
+  it("moves only the dragged edge", () => {
+    expect(resizeFrame(start, "e", 40, 0, viewport)).toEqual({ ...start, width: 800 });
+    expect(resizeFrame(start, "w", -40, 0, viewport)).toEqual({
+      ...start,
+      x: 60,
+      width: 800,
+    });
+  });
+
+  it("stops an edge at the screen instead of shoving the window along", () => {
+    // Past the left edge the right edge must stay where it was.
+    const frame = resizeFrame(start, "w", -500, 0, viewport);
+    expect(frame.x).toBe(0);
+    expect(frame.x + frame.width).toBe(start.x + start.width);
+    const tall = resizeFrame(start, "n", 0, -1000, viewport);
+    expect(tall.y).toBe(0);
+    expect(tall.y + tall.height).toBe(start.y + start.height);
+  });
+
+  it("stops at the minimum size on the side being dragged", () => {
+    const frame = resizeFrame(start, "w", 2000, 0, viewport);
+    expect(frame.width).toBe(360);
+    expect(frame.x + frame.width).toBe(start.x + start.width);
+  });
+
+  it("grows a corner in both directions at once", () => {
+    expect(resizeFrame(start, "se", 20, 30, viewport)).toEqual({
+      ...start,
+      width: 780,
+      height: 490,
+    });
+  });
+});
+
+describe("snapFrame", () => {
+  const viewport = { width: 1440, height: 900 };
+
+  it("splits the screen into two halves with an even gutter", () => {
+    const left = snapFrame("left", viewport);
+    const right = snapFrame("right", viewport);
+    expect(left.x).toBe(16);
+    expect(right.x + right.width).toBe(1440 - 16);
+    expect(right.x - (left.x + left.width)).toBeGreaterThanOrEqual(16);
+    expect(left.height).toBe(900 - 32);
+  });
+
+  it("lays a full-width strip along the bottom", () => {
+    const bottom = snapFrame("bottom", viewport);
+    expect(bottom.width).toBe(1440 - 32);
+    expect(900 - (bottom.y + bottom.height)).toBe(16);
+  });
+
+  it("still honours the minimum size on a small screen", () => {
+    const left = snapFrame("left", { width: 600, height: 400 });
+    expect(left.width).toBe(360);
+    expect(left.x + left.width).toBeLessThanOrEqual(600);
   });
 });

@@ -2,7 +2,7 @@
 // where you actually work, so recency must win and must not also leave the
 // same directory duplicated further down.
 import { describe, expect, it } from "vitest";
-import { buildSections, shortenPath, type ScopeOption } from "./scopes";
+import { buildSections, shortenPath, worktreeLabel, type ScopeOption } from "./scopes";
 
 function scope(key: string, kind: "project" | "home" = "project"): ScopeOption {
   return {
@@ -78,3 +78,43 @@ describe("shortenPath", () => {
     expect(shortenPath(path)).toBe(path);
   });
 });
+
+describe("buildSections with a directory in view", () => {
+  const project = (key: string, label = key): ScopeOption => ({
+    key,
+    label,
+    detail: `/src/${label}`,
+    hostName: "mac",
+    online: true,
+    kind: "project",
+  });
+
+  it("puts it first and never repeats it", () => {
+    const here = project("project:a", "a");
+    const sections = buildSections([here, project("project:b", "b")], ["project:a"], here);
+    expect(sections.map((section) => section.id)).toEqual(["here", "projects"]);
+    expect(sections[0]!.scopes).toEqual([here]);
+    expect(sections.flatMap((section) => section.scopes.map((scope) => scope.key))).toEqual([
+      "project:a",
+      "project:b",
+    ]);
+  });
+
+  it("draws a worktree with a branch", () => {
+    const worktree: ScopeOption = { ...project("env:e1", "feat/x"), kind: "worktree" };
+    const sections = buildSections([project("project:a")], [], worktree);
+    expect(sections[0]).toMatchObject({ id: "here", icon: "GitBranch" });
+  });
+});
+
+describe("worktreeLabel", () => {
+  it("drops bb's branch prefix and thread suffix", () => {
+    expect(worktreeLabel("bb/reduce-cold-build-depth-thr_5fn7e7pv2c")).toBe("reduce-cold-build-depth");
+  });
+
+  it("leaves a branch someone named alone", () => {
+    expect(worktreeLabel("feat/login")).toBe("feat/login");
+    expect(worktreeLabel("main")).toBe("main");
+  });
+});
+
