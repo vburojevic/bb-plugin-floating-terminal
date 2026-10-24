@@ -361,9 +361,16 @@
  * Transparent lets the body through, and the body is painted with the exact
  * colour the terminal resolved (see `surface` in floating-terminal.tsx), so
  * the remainder cannot differ from it by even a rounding step.
+ *
+ * !important because the page can carry a second xterm.css: bb lazy-loads its
+ * own terminal's stylesheet the first time one of its terminals opens, and
+ * that newer copy says `.xterm:not(.allow-transparency) .xterm-viewport` —
+ * the same specificity as this rule, loaded later, so it won and the strip
+ * came back mid-session. Out-ranking xterm's selector of the month is a race
+ * this rule would keep losing.
  */
 .bb-ft-window .xterm .xterm-viewport {
-  background-color: transparent;
+  background-color: transparent !important;
 }
 
 /*
