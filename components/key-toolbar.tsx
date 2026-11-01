@@ -60,7 +60,13 @@ export function KeyToolbar({ ctrlArmed, onKey }: KeyToolbarProps) {
               pressed.current = null;
               onKey(key);
             }}
+            // A touch is held to the button it went down on until it lifts, but
+            // a mouse is not: one released elsewhere would leave the press set
+            // for a later drag that ends here.
             onPointerCancel={() => {
+              pressed.current = null;
+            }}
+            onPointerLeave={() => {
               pressed.current = null;
             }}
             className={cn(

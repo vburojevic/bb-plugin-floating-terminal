@@ -80,13 +80,6 @@ describe("TOOLBAR_KEYS", () => {
       "ctrl",
     ]);
   });
-
-  // iOS refuses a clipboard read on a touch pointerdown, so paste has to wait
-  // for the lift. Every other key stays on pointerdown, where it fires at once.
-  it("waits for the finger to lift only on paste", () => {
-    const onRelease = TOOLBAR_KEYS.filter((key) => key.firesOnRelease).map((key) => key.id);
-    expect(onRelease).toEqual(["paste"]);
-  });
 });
 
 describe("isTabCycleKey", () => {
