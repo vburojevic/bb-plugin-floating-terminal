@@ -19,6 +19,12 @@ export interface ToolbarKey {
   direction?: "up" | "down" | "left" | "right";
   /** Set the button apart from the plain character keys. */
   emphasis?: boolean;
+  /**
+   * Fire when the finger lifts rather than when it lands. Only for a key whose
+   * action the browser gates on user activation, which a touch pointerdown is
+   * not: iOS refuses `navigator.clipboard.readText()` there every time.
+   */
+  firesOnRelease?: boolean;
 }
 
 /**
@@ -79,7 +85,7 @@ export const TOOLBAR_KEYS: readonly ToolbarKey[] = [
   { id: "dash", label: "-", title: "Dash", kind: "send", send: "-" },
   { id: "underscore", label: "_", title: "Underscore", kind: "send", send: "_" },
   { id: "find", label: "find", title: "Find in scrollback", kind: "action" },
-  { id: "paste", label: "paste", title: "Paste from clipboard", kind: "action" },
+  { id: "paste", label: "paste", title: "Paste from clipboard", kind: "action", firesOnRelease: true },
   { id: "dismiss", label: "⌄", title: "Hide keyboard", kind: "action", emphasis: true },
 ];
 
