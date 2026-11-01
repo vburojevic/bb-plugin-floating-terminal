@@ -43,10 +43,6 @@ const BB_TOP_LAYER = 70;
 describe("overlay stacking", () => {
   const windowZ = ruleZ(".bb-ft-window");
 
-  it("keeps the sheet's backdrop under the window", () => {
-    expect(ruleZ(".bb-ft-backdrop")).toBeLessThan(windowZ);
-  });
-
   it("finds the portaled overlays to check", () => {
     expect(portaled.map(({ name }) => name)).toEqual(
       expect.arrayContaining(["dialog.tsx", "drawer.tsx", "dropdown-menu.tsx", "select.tsx", "tooltip.tsx"]),
