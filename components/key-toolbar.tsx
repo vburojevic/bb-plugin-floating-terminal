@@ -8,6 +8,7 @@
 // Ctrl is a latch rather than a chord: there is no way to hold two keys at once
 // on a touch screen, so tapping it arms the modifier and the next character
 // typed on the software keyboard becomes its control code.
+import { useRef } from "react";
 import { TOOLBAR_KEYS, type ToolbarKey } from "@/lib/keys";
 import { cn } from "@/lib/utils";
 
@@ -17,6 +18,10 @@ export interface KeyToolbarProps {
 }
 
 export function KeyToolbar({ ctrlArmed, onKey }: KeyToolbarProps) {
+  // The pointer that went down on a release key, so the key fires only for the
+  // press that started on it. A touch that scrolls the bar ends in
+  // pointercancel instead of pointerup, which clears this without firing.
+  const pressed = useRef<{ id: string; pointerId: number } | null>(null);
   return (
     <div
       className="bb-ft-keybar flex shrink-0 items-center gap-1 border-t border-border bg-muted/40"
@@ -37,9 +42,26 @@ export function KeyToolbar({ ctrlArmed, onKey }: KeyToolbarProps) {
             // from the terminal, and on iOS losing focus dismisses the keyboard.
             // Preventing the default keeps focus where it is, so the bar can be
             // used mid-command without the keyboard flapping open and shut.
+            //
+            // A key that needs user activation waits for the lift instead: a
+            // touch pointerdown does not count as activation, pointerup does,
+            // so paste fired on the way down was refused on every iPhone.
             onPointerDown={(event) => {
               event.preventDefault();
+              if (key.firesOnRelease) {
+                pressed.current = { id: key.id, pointerId: event.pointerId };
+                return;
+              }
               onKey(key);
+            }}
+            onPointerUp={(event) => {
+              const press = pressed.current;
+              if (press?.id !== key.id || press.pointerId !== event.pointerId) return;
+              pressed.current = null;
+              onKey(key);
+            }}
+            onPointerCancel={() => {
+              pressed.current = null;
             }}
             className={cn(
               "bb-ft-key",
