@@ -34,6 +34,7 @@ import {
 } from "./terminal-io";
 import { planAttach, TerminalSocket, terminalSocketUrl } from "./socket";
 import { arrowSequence, controlCode, isTabCycleKey, windowChord } from "./keys";
+import { forwardLateImeInput } from "./late-ime-input";
 import { consumeScrollPixels } from "./scroll";
 import { resolveMonoFont, resolveTerminalTheme } from "./theme";
 
@@ -182,6 +183,8 @@ export class TerminalPump {
   private started = false;
   private disposed = false;
   private resizeObserver: ResizeObserver | null = null;
+  /** iOS IME candidates xterm drops; see late-ime-input.ts. */
+  private lateImeInput: { dispose: () => void } | null = null;
   /** No socket to be had: no WebSocket here, or a bb (0.35) that cannot resume one. */
   private socketUnsupported = typeof WebSocket === "undefined";
   private transport: Transport = this.socketUnsupported ? "poll" : "socket";
@@ -281,6 +284,8 @@ export class TerminalPump {
     }
     this.loadWebglRenderer();
     this.terminal.open(options.container);
+    // Right after open(), so its listeners and timer run after xterm's own.
+    this.lateImeInput = forwardLateImeInput(this.terminal);
     this.observeContainer();
     this.warmSymbolFont();
     this.installTouchScroll();
@@ -333,6 +338,9 @@ export class TerminalPump {
       if (this.ctrlArmed && !event.ctrlKey && !event.metaKey && !event.altKey) {
         const code = controlCode(event.key);
         if (code !== null) {
+          // Handled: no letter goes into the textarea, and late-ime-input.ts
+          // does not forward one an iOS keyboard inserts after the fact.
+          event.preventDefault();
           this.setCtrlArmed(false);
           this.handleInput(code);
           return false;
@@ -1301,6 +1309,8 @@ export class TerminalPump {
     this.closeSocket();
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
+    this.lateImeInput?.dispose();
+    this.lateImeInput = null;
     if (this.flushTimer !== null) window.clearTimeout(this.flushTimer);
     if (this.resizeTimer !== null) window.clearTimeout(this.resizeTimer);
     this.terminal.dispose();
