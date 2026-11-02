@@ -4,11 +4,13 @@
 // setTimeout(0), which on iOS runs before the text lands, and then skips the
 // late input because it still thinks the key is down. The candidate never
 // reaches onData. This forwards exactly that late text once, and stays out of
-// the way when xterm already sent it (Chrome/Android order, keyup-before-input)
+// the way when xterm already sent it (Chrome/Android order, keyup-before-input),
 // a real composition starts, or a key handler consumed the key.
 //
 // Install right after terminal.open(), so its listeners and timer run after
-// xterm's own. Mirrors get-bb/bb#6815.
+// xterm's own. That ordering holds only because xterm also listens on the
+// textarea in the capture phase: at the target, capture listeners run before
+// bubble ones whatever the order they were added in. Mirrors get-bb/bb#6815.
 import type { IDisposable, Terminal } from "@xterm/xterm";
 
 const IME_PROCESS_KEY_CODE = 229;

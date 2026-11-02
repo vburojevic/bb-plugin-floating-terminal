@@ -10,14 +10,14 @@ import { Terminal } from "@xterm/xterm";
 import { forwardLateImeInput } from "./late-ime-input";
 
 // xterm probes a canvas at import time; jsdom has none and logs a loud
-// "Not implemented" unless it is stubbed before the import.
-const canvasContext = vi.hoisted(() => {
+// "Not implemented" unless it is stubbed before the import. The stub stays for
+// the whole file, so the Terminal each test creates measures with it too.
+vi.hoisted(() => {
   const context = {
     measureText: (text: string) => ({ width: text.length * 9 }),
   } as unknown as CanvasRenderingContext2D;
   HTMLCanvasElement.prototype.getContext = (() =>
     context) as unknown as HTMLCanvasElement["getContext"];
-  return context;
 });
 
 let terminal: Terminal;
@@ -25,9 +25,6 @@ let host: HTMLDivElement;
 let sent: string[];
 
 beforeEach(() => {
-  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
-    canvasContext,
-  );
   // jsdom has no matchMedia; xterm only uses it to watch devicePixelRatio.
   vi.stubGlobal("matchMedia", () => ({
     matches: false,
@@ -137,6 +134,36 @@ describe("forwardLateImeInput", () => {
       await nextTask();
       imeKeyUp("你好");
       insertText("你好");
+      await nextTask();
+      expect(sent).toEqual(["你好"]);
+    } finally {
+      forwarding.dispose();
+    }
+  });
+
+  it("leaves a real composition to xterm", async () => {
+    // The order the iOS Simulator's Pinyin keyboard and Android IMEs send:
+    // the 229 keydown opens a composition, and xterm sends the text on its end.
+    const forwarding = forwardLateImeInput(terminal);
+    try {
+      const element = textarea();
+      imeKeyDown("n");
+      element.dispatchEvent(new CompositionEvent("compositionstart", { data: "" }));
+      element.value = "ni";
+      element.dispatchEvent(new CompositionEvent("compositionupdate", { data: "ni" }));
+      element.dispatchEvent(
+        new InputEvent("input", {
+          bubbles: true,
+          data: "ni",
+          inputType: "insertCompositionText",
+          isComposing: true,
+        }),
+      );
+      await nextTask();
+      element.value = "你好";
+      element.dispatchEvent(new CompositionEvent("compositionend", { data: "你好" }));
+      imeKeyUp("n");
+      await nextTask();
       await nextTask();
       expect(sent).toEqual(["你好"]);
     } finally {
