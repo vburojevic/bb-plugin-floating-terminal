@@ -161,11 +161,25 @@ describe("TerminalSocket", () => {
   it("treats a missing session as gone, and other errors as a close to come", () => {
     const { fake, handlers } = setup();
     fake.open();
-    fake.receive({ type: "error", code: "forbidden_origin", message: "no" });
+    fake.receive({ type: "attached", session, replayStartSeq: 0, nextSeq: 0 });
+    fake.receive({ type: "error", code: "host_disconnected", message: "no" });
     expect(handlers.onGone).not.toHaveBeenCalled();
+    expect(handlers.onClosed).not.toHaveBeenCalled();
     fake.receive({ type: "error", code: "terminal_not_found", message: "gone" });
     expect(handlers.onGone).toHaveBeenCalledWith("terminal_not_found", "gone");
     expect(fake.closed).toBe(true);
+  });
+
+  it("closes an attach that failed, which bb leaves open with nothing to stream", () => {
+    for (const code of ["terminal_attach_timeout", "host_disconnected"]) {
+      const { fake, handlers, socket } = setup();
+      fake.open();
+      fake.receive({ type: "error", code, message: "attach failed" });
+      expect(fake.closed).toBe(true);
+      expect(handlers.onClosed).toHaveBeenCalledWith(false);
+      expect(handlers.onGone).not.toHaveBeenCalled();
+      expect(socket.ready()).toBe(false);
+    }
   });
 
   it("says whether a dropped connection had ever attached", () => {

@@ -254,8 +254,15 @@ export class TerminalSocket {
         if (GONE_CODES.has(code) || code === "terminal_not_running") {
           this.handlers.onGone(code, text);
           this.dispose();
+        } else if (!this.attached) {
+          // A failed attach (it timed out, the host dropped) leaves the socket
+          // open but unregistered, and bb still answers its pings: nothing
+          // would ever stream. Close it as one that never attached, so the
+          // pump retries and, if that keeps failing, polls.
+          this.dispose();
+          this.handlers.onClosed(false);
         }
-        // Anything else is followed by a close, which reports it.
+        // After attaching, anything else is followed by a close, which reports it.
         return;
       }
       default:
