@@ -144,6 +144,8 @@ describe("forwardLateImeInput", () => {
   it("leaves a real composition to xterm", async () => {
     // The order the iOS Simulator's Pinyin keyboard and Android IMEs send:
     // the 229 keydown opens a composition, and xterm sends the text on its end.
+    // Older WebKit then reports the commit once more as a plain insertText,
+    // which must not be forwarded a second time.
     const forwarding = forwardLateImeInput(terminal);
     try {
       const element = textarea();
@@ -162,6 +164,14 @@ describe("forwardLateImeInput", () => {
       await nextTask();
       element.value = "你好";
       element.dispatchEvent(new CompositionEvent("compositionend", { data: "你好" }));
+      element.dispatchEvent(
+        new InputEvent("input", {
+          bubbles: true,
+          composed: true,
+          data: "你好",
+          inputType: "insertText",
+        }),
+      );
       imeKeyUp("n");
       await nextTask();
       await nextTask();
