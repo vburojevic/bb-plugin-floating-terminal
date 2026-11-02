@@ -1,9 +1,15 @@
 // The pump between one xterm instance and one bb terminal session.
 //
-// bb exposes terminal output as a sequence-numbered buffer rather than a plugin
-// stream, so this polls — fast while bytes are moving, backing off to a slow
-// heartbeat when the shell is quiet, and stopping entirely while its tab is
-// hidden (the session keeps running server-side and is caught up on return).
+// The fast path is the socket bb's own terminal panel uses (lib/socket.ts):
+// keystrokes go up it as they are typed and output is pushed down it as the pty
+// writes, so an echo costs one network round trip and nothing more. When that
+// socket is not on offer — an older bb, a proxy that refuses the upgrade — the
+// pump falls back to the plugin RPC, where output is a sequence-numbered buffer
+// it has to poll: fast while bytes are moving, backing off to a slow heartbeat
+// when the shell is quiet. While it polls it keeps trying the socket every 30 s,
+// since one that was only down for a while should come back. Either way
+// nothing runs while the window is hidden (the session keeps going server-side
+// and is caught up on return).
 //
 // One pump per tab, owned by a TerminalView effect. The pump knows nothing
 // about tabs or windows; it reports status upward and asks for a restart when
@@ -26,6 +32,7 @@ import {
   encodeInputChunks,
   normalizeTerminalTitle,
 } from "./terminal-io";
+import { planAttach, TerminalSocket, terminalSocketUrl } from "./socket";
 import { arrowSequence, controlCode, isTabCycleKey, windowChord } from "./keys";
 import { consumeScrollPixels } from "./scroll";
 import { resolveMonoFont, resolveTerminalTheme } from "./theme";
@@ -48,6 +55,21 @@ const SELECTION_SETTLE_MS = 160;
 /** Coalesce burst keystrokes and pastes into one request. */
 const INPUT_FLUSH_MS = 4;
 const RESIZE_DEBOUNCE_MS = 90;
+/** Backoff between socket reconnects, in ms; the last one repeats. */
+const SOCKET_RETRY_MS = [100, 250, 500, 1000, 2000] as const;
+/**
+ * Consecutive connections that close without attaching (or straight after)
+ * before the pump polls instead. More than one, so a socket that loses a race
+ * with a server restart is not mistaken for one that is refused outright.
+ */
+const SOCKET_MAX_FAILURES = 3;
+/**
+ * While a tab polls because its socket kept failing, how often it tries the
+ * socket again. Showing the window, or switching to the tab, tries at once.
+ */
+const SOCKET_PROBE_MS = 30_000;
+/** A socket that stayed attached this long was working; its drop is not a failure. */
+const SOCKET_STABLE_MS = 5000;
 /** What bb's own terminal keeps, so scrollback depth matches between the two. */
 const SCROLLBACK_LINES = 10_000;
 /** Matches bb's terminal, whose wide-glyph widths come from Unicode 11. */
@@ -68,6 +90,9 @@ const FLING_MAX_PX_PER_FRAME = 90;
 const FALLBACK_CELL_PX = 17;
 
 export type PumpMode = "active" | "background" | "paused";
+
+/** Which path output and keystrokes take; see the header. */
+type Transport = "socket" | "poll";
 
 let webgl2: boolean | null = null;
 
@@ -157,6 +182,29 @@ export class TerminalPump {
   private started = false;
   private disposed = false;
   private resizeObserver: ResizeObserver | null = null;
+  /** No socket to be had: no WebSocket here, or a bb (0.35) that cannot resume one. */
+  private socketUnsupported = typeof WebSocket === "undefined";
+  private transport: Transport = this.socketUnsupported ? "poll" : "socket";
+  private socket: TerminalSocket | null = null;
+  /** Connections in a row that closed before attaching; see SOCKET_MAX_FAILURES. */
+  private socketFailures = 0;
+  private reconnectAttempt = 0;
+  private reconnectTimer: number | null = null;
+  /** When the current socket attached; see SOCKET_STABLE_MS. */
+  private socketAttachedAt = 0;
+  /**
+   * Socket chunks below this seq are a replay of retained output into a freshly
+   * reset terminal, muted the same way the RPC replay is. Null once caught up.
+   */
+  private replayUntilSeq: number | null = null;
+  /** RPC writes not yet settled; the socket waits so keystrokes stay in order. */
+  private rpcWritesInFlight = 0;
+  /**
+   * The size this tab was last fitted to. Null until it has been on screen: a
+   * tab behind another one is display:none, and its xterm still reports the
+   * 80x24 it was created with.
+   */
+  private lastSize: { cols: number; rows: number } | null = null;
   /**
    * Non-zero while replayed scrollback is still being parsed. xterm answers
    * some sequences (cursor-position reports, device attributes) through onData,
@@ -692,6 +740,214 @@ export class TerminalPump {
     });
   }
 
+  /** Output from either transport that is not a replay: status and activity. */
+  private noteLiveOutput(): void {
+    if (this.status !== "live") this.setStatus("live");
+    if (
+      this.mode === "background" &&
+      Date.now() - this.backgroundSince > BACKGROUND_GRACE_MS
+    ) {
+      this.options.onActivity?.("output");
+    }
+  }
+
+  // ---------------------------------------------------------------- socket
+
+  /**
+   * Open the push connection, resuming after the last byte already written.
+   * Only while the window is open: a hidden window holds no connection, the
+   * same way it does not poll. While the tab is polling as a fallback, this is
+   * the retry that hands it back to the socket once one attaches.
+   */
+  private connectSocket(): void {
+    if (
+      this.socketUnsupported ||
+      this.socket !== null ||
+      this.disposed ||
+      !this.started ||
+      this.mode === "paused" ||
+      this.status === "exited"
+    ) {
+      return;
+    }
+    this.clearReconnect();
+    let socket: TerminalSocket;
+    try {
+      socket = new TerminalSocket({
+        url: terminalSocketUrl(
+          window.location,
+          this.options.terminalId,
+          this.nextSeq,
+        ),
+        handlers: {
+          onAttached: (info) => this.onSocketAttached(socket, info),
+          onOutput: (seq, dataBase64) =>
+            this.onSocketOutput(socket, seq, dataBase64),
+          onExited: (session) => {
+            if (this.socket !== socket) return;
+            this.socket = null;
+            this.reportExit(session.status, session.exitCode);
+          },
+          onGone: (code) => {
+            if (this.socket !== socket) return;
+            this.socket = null;
+            if (code === "terminal_not_running") {
+              // Starting, or between states: the RPC path knows how to wait
+              // that out and report what it settles into.
+              this.fallBackToPolling();
+            } else {
+              this.reportExit("gone", null);
+            }
+          },
+          onClosed: (attached) => this.onSocketClosed(socket, attached),
+        },
+      });
+    } catch {
+      this.fallBackToPolling();
+      return;
+    }
+    this.socket = socket;
+  }
+
+  private onSocketAttached(
+    socket: TerminalSocket,
+    info: {
+      replayStartSeq: number | null;
+      nextSeq: number;
+      session: { status: string };
+    },
+  ): void {
+    if (this.socket !== socket || this.disposed) return;
+    if (info.replayStartSeq === null) {
+      // bb 0.35: attach cannot resume from a seq, so every reconnect would
+      // replay from wherever the server chose. Polling handles that bb fine.
+      this.socketUnsupported = true;
+      this.fallBackToPolling();
+      return;
+    }
+    if (this.transport === "poll") {
+      // A retry got through: the socket takes over from the polling loop. A
+      // read still out when this lands is dropped (see poll()), and anything
+      // polling already wrote is skipped below by its seq.
+      this.transport = "socket";
+      this.stopPolling();
+    }
+    this.socketAttachedAt = Date.now();
+    const plan = planAttach(this.nextSeq, info.replayStartSeq, info.nextSeq);
+    // The ring buffer wrapped past our cursor while we were away; redraw from
+    // what is retained rather than splicing a hole into scrollback.
+    if (plan.reset) this.terminal.reset();
+    this.nextSeq = plan.cursor;
+    this.replayUntilSeq = plan.replayUntilSeq;
+    if (info.session.status === "running" || info.session.status === "starting") {
+      this.setStatus("live");
+    }
+    // Attaching made this socket the session's resize owner, so this always
+    // lands: opening the window on a device sizes the pty to that device,
+    // even when another one had it last. A tab that has never been on screen
+    // has no size of its own yet, and leaves the pty as it is.
+    if (this.lastSize !== null) {
+      socket.sendResize(this.lastSize.cols, this.lastSize.rows);
+    }
+    // Anything typed while the socket was down went to the RPC outbox; send it
+    // now so it does not sit behind the coalescing timer.
+    if (this.outbox.length > 0) {
+      if (this.flushTimer !== null) window.clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+      this.flushInput();
+    }
+  }
+
+  private onSocketOutput(
+    socket: TerminalSocket,
+    seq: number,
+    dataBase64: string,
+  ): void {
+    if (this.socket !== socket || this.disposed) return;
+    // Already written (a reconnect that resumed a little early).
+    if (seq < this.nextSeq) return;
+    const isReplay = this.replayUntilSeq !== null && seq < this.replayUntilSeq;
+    if (this.replayUntilSeq !== null && seq + 1 >= this.replayUntilSeq) {
+      this.replayUntilSeq = null;
+    }
+    this.nextSeq = seq + 1;
+    this.writeOutput(base64ToBytes(dataBase64), isReplay);
+    if (!isReplay) this.noteLiveOutput();
+  }
+
+  private onSocketClosed(socket: TerminalSocket, attached: boolean): void {
+    if (this.socket !== socket) return;
+    this.socket = null;
+    if (this.disposed || this.status === "exited") return;
+    // A connection that attached and then held is a healthy one that dropped
+    // (a server restart, a network blip): retry it from the top. One that
+    // never attached, or that was cut straight after, counts against the
+    // socket — otherwise a proxy that kills it on arrival would have the pump
+    // reconnecting every 100 ms for ever instead of polling.
+    if (attached && Date.now() - this.socketAttachedAt >= SOCKET_STABLE_MS) {
+      this.socketFailures = 0;
+      this.reconnectAttempt = 0;
+    } else {
+      this.socketFailures += 1;
+      if (this.socketFailures >= SOCKET_MAX_FAILURES) {
+        this.fallBackToPolling();
+        return;
+      }
+    }
+    this.scheduleReconnect();
+  }
+
+  /** Quick retries while the socket is the transport, slow ones while polling. */
+  private scheduleReconnect(): void {
+    if (
+      this.reconnectTimer !== null ||
+      this.socketUnsupported ||
+      this.mode === "paused" ||
+      this.disposed
+    ) {
+      return;
+    }
+    const delay =
+      this.transport === "poll"
+        ? SOCKET_PROBE_MS
+        : SOCKET_RETRY_MS[Math.min(this.reconnectAttempt, SOCKET_RETRY_MS.length - 1)]!;
+    this.reconnectAttempt += 1;
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connectSocket();
+    }, delay);
+  }
+
+  private clearReconnect(): void {
+    if (this.reconnectTimer === null) return;
+    window.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+
+  private closeSocket(): void {
+    this.clearReconnect();
+    this.socket?.dispose();
+    this.socket = null;
+  }
+
+  /**
+   * The socket is not working here; poll over RPC, and try the socket again
+   * now and then in case it was only down for a while (a bb restart, a phone
+   * changing networks).
+   */
+  private fallBackToPolling(): void {
+    this.closeSocket();
+    if (this.disposed) return;
+    if (this.transport === "socket") {
+      this.transport = "poll";
+      this.replayUntilSeq = null;
+      this.interval = FAST_INTERVAL;
+      if (this.nextSeq === 0) void this.replay();
+      else this.schedule(0);
+    }
+    this.scheduleReconnect();
+  }
+
   /**
    * Everything the shell receives goes through here — real keystrokes and the
    * on-screen bar alike — so the dead-prompt restart works from both.
@@ -737,6 +993,23 @@ export class TerminalPump {
   }
 
   private queueInput(data: string): void {
+    // Straight up the socket: no coalescing timer and no request per burst,
+    // which is the whole point of having one. Only when nothing is queued for
+    // the RPC path, or this keystroke would overtake an earlier one.
+    if (
+      this.socket?.ready() === true &&
+      this.outbox.length === 0 &&
+      this.rpcWritesInFlight === 0
+    ) {
+      // A socket cannot close between two sends in the same task, so if the
+      // first chunk goes the rest of a paste does too.
+      const [first, ...rest] = encodeInputChunks(data);
+      if (first === undefined) return;
+      if (this.socket.sendInput(first)) {
+        for (const chunk of rest) this.socket.sendInput(chunk);
+        return;
+      }
+    }
     this.outbox.push(data);
     if (this.flushTimer !== null) return;
     this.flushTimer = window.setTimeout(() => {
@@ -753,6 +1026,7 @@ export class TerminalPump {
     // Chained so keystrokes reach the pty in the order they were typed, and
     // chunked so a paste over the transport ceiling is split instead of refused.
     for (const dataBase64 of encodeInputChunks(pending)) {
+      this.rpcWritesInFlight += 1;
       this.writeChain = this.writeChain
         .then(() =>
           this.options.rpc.call("write", {
@@ -765,6 +1039,9 @@ export class TerminalPump {
             "error",
             error instanceof Error ? error.message : "Write failed",
           );
+        })
+        .finally(() => {
+          this.rpcWritesInFlight -= 1;
         });
     }
     // Any keystroke pulls polling back to its fastest.
@@ -777,6 +1054,10 @@ export class TerminalPump {
     this.resizeTimer = window.setTimeout(() => {
       this.resizeTimer = null;
       if (this.disposed) return;
+      // Over RPC even when the socket is up. bb lets only the session's most
+      // recently attached socket resize it, so with the same tab open on a
+      // phone and a laptop, a socket resize from the other one is dropped and
+      // its lines wrap at the wrong width. The RPC resize always lands.
       void this.options.rpc
         .call("resize", { terminalId: this.options.terminalId, cols, rows })
         .catch(() => {
@@ -795,6 +1076,7 @@ export class TerminalPump {
 
   private schedule(delay: number): void {
     this.stopPolling();
+    if (this.transport !== "poll") return;
     if (this.disposed || this.mode === "paused" || !this.started) return;
     if (this.mode === "background") delay = Math.max(delay, BACKGROUND_INTERVAL);
     // A read already in flight will schedule the next one when it lands;
@@ -813,13 +1095,20 @@ export class TerminalPump {
     let next: "schedule" | "replay" | "stop" = "schedule";
 
     try {
+      const sinceSeq = this.nextSeq;
       const result = await this.options.rpc.call("read", {
         terminalId: this.options.terminalId,
-        sinceSeq: this.nextSeq,
+        sinceSeq,
       });
 
-      if (this.disposed) {
+      if (this.disposed || this.transport !== "poll") {
+        // Or the socket took over while this read was out, and its output is
+        // already on screen or on the way.
         next = "stop";
+      } else if (this.nextSeq !== sinceSeq) {
+        // A socket wrote past this read while it was out, and then dropped;
+        // writing it now would repeat that output. Read again from there.
+        next = "schedule";
       } else if (result.truncated && this.nextSeq > 0) {
         // The ring buffer wrapped past our cursor while this tab was hidden;
         // redraw from the tail rather than splicing a hole into scrollback.
@@ -832,13 +1121,7 @@ export class TerminalPump {
 
         if (result.chunks.length > 0) {
           this.interval = FAST_INTERVAL;
-          if (this.status !== "live") this.setStatus("live");
-          if (
-            this.mode === "background" &&
-            Date.now() - this.backgroundSince > BACKGROUND_GRACE_MS
-          ) {
-            this.options.onActivity?.("output");
-          }
+          this.noteLiveOutput();
         } else if (
           result.status !== null &&
           result.status !== "running" &&
@@ -852,7 +1135,7 @@ export class TerminalPump {
         }
       }
     } catch (error) {
-      if (this.disposed) {
+      if (this.disposed || this.transport !== "poll") {
         next = "stop";
       } else {
         this.setStatus(
@@ -871,6 +1154,7 @@ export class TerminalPump {
 
   private reportExit(status: string, exitCode: number | null): void {
     this.stopPolling();
+    this.closeSocket();
     const label =
       status === "gone"
         ? "Session closed"
@@ -895,7 +1179,8 @@ export class TerminalPump {
         sinceSeq: 0,
         replay: true,
       });
-      if (!this.disposed) {
+      // Not if the socket took over meanwhile: it replays on attach itself.
+      if (!this.disposed && this.transport === "poll") {
         this.terminal.reset();
         for (const chunk of result.chunks) {
           this.writeOutput(base64ToBytes(chunk.dataBase64), true);
@@ -906,7 +1191,7 @@ export class TerminalPump {
         ok = true;
       }
     } catch (error) {
-      if (!this.disposed) {
+      if (!this.disposed && this.transport === "poll") {
         this.setStatus(
           "error",
           error instanceof Error ? error.message : "Could not attach",
@@ -927,7 +1212,10 @@ export class TerminalPump {
   start(): void {
     if (this.started || this.disposed) return;
     this.started = true;
-    void this.replay();
+    // The socket replays retained output as part of attaching. It only opens
+    // while the window is, so a hidden one connects when it is first shown.
+    if (this.transport === "socket") this.connectSocket();
+    else void this.replay();
   }
 
   /**
@@ -942,13 +1230,19 @@ export class TerminalPump {
       this.fit();
       this.interval = FAST_INTERVAL;
       this.schedule(0);
+      this.connectSocket();
     } else if (mode === "background") {
       this.backgroundSince = Date.now();
       // Leaving the screen is not news; arriving in the background from a
       // hidden window can start at the slow cadence straight away.
       this.schedule(previous === "paused" ? 0 : BACKGROUND_INTERVAL);
+      // A pushed socket costs nothing while quiet, so a background tab keeps
+      // its own: it still has to say "this one printed something".
+      this.connectSocket();
     } else {
       this.stopPolling();
+      this.closeSocket();
+      this.reconnectAttempt = 0;
     }
   }
 
@@ -957,7 +1251,13 @@ export class TerminalPump {
     const { clientWidth, clientHeight } = this.options.container;
     if (clientWidth === 0 || clientHeight === 0) return;
     try {
+      // fit() does nothing until the renderer has measured a cell; only a
+      // fit that happened counts as this tab's size.
+      const proposed = this.fitAddon.proposeDimensions();
       this.fitAddon.fit();
+      if (proposed !== undefined && Number.isFinite(proposed.cols)) {
+        this.lastSize = { cols: this.terminal.cols, rows: this.terminal.rows };
+      }
     } catch {
       // fit() throws if the renderer is not ready yet; the next call succeeds.
     }
@@ -998,6 +1298,7 @@ export class TerminalPump {
     el.removeEventListener("touchend", this.onTouchEnd);
     el.removeEventListener("touchcancel", this.onTouchEnd);
     this.stopPolling();
+    this.closeSocket();
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     if (this.flushTimer !== null) window.clearTimeout(this.flushTimer);
