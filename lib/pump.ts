@@ -192,6 +192,11 @@ export class TerminalPump {
   private replayUntilSeq: number | null = null;
   /** RPC writes not yet settled; the socket waits so keystrokes stay in order. */
   private rpcWritesInFlight = 0;
+  /**
+   * The size this tab was last fitted to. Null until it has been on screen: a
+   * tab behind another one is display:none, and its xterm still reports the
+   * 80x24 it was created with.
+   */
   private lastSize: { cols: number; rows: number } | null = null;
   /**
    * Non-zero while replayed scrollback is still being parsed. xterm answers
@@ -829,9 +834,11 @@ export class TerminalPump {
     }
     // Attaching made this socket the session's resize owner, so this always
     // lands: opening the window on a device sizes the pty to that device,
-    // even when another one had it last.
-    const size = this.lastSize ?? { cols: this.terminal.cols, rows: this.terminal.rows };
-    socket.sendResize(size.cols, size.rows);
+    // even when another one had it last. A tab that has never been on screen
+    // has no size of its own yet, and leaves the pty as it is.
+    if (this.lastSize !== null) {
+      socket.sendResize(this.lastSize.cols, this.lastSize.rows);
+    }
     // Anything typed while the socket was down went to the RPC outbox; send it
     // now so it does not sit behind the coalescing timer.
     if (this.outbox.length > 0) {
@@ -1018,7 +1025,6 @@ export class TerminalPump {
   }
 
   private scheduleResize(cols: number, rows: number): void {
-    this.lastSize = { cols, rows };
     if (this.resizeTimer !== null) window.clearTimeout(this.resizeTimer);
     this.resizeTimer = window.setTimeout(() => {
       this.resizeTimer = null;
@@ -1212,7 +1218,13 @@ export class TerminalPump {
     const { clientWidth, clientHeight } = this.options.container;
     if (clientWidth === 0 || clientHeight === 0) return;
     try {
+      // fit() does nothing until the renderer has measured a cell; only a
+      // fit that happened counts as this tab's size.
+      const proposed = this.fitAddon.proposeDimensions();
       this.fitAddon.fit();
+      if (proposed !== undefined && Number.isFinite(proposed.cols)) {
+        this.lastSize = { cols: this.terminal.cols, rows: this.terminal.rows };
+      }
     } catch {
       // fit() throws if the renderer is not ready yet; the next call succeeds.
     }
