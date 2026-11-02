@@ -256,13 +256,15 @@ tab in an open window holds one, none are held while the window is hidden,
 and a reconnect resumes from the last byte written. Only what every bb since
 0.36 speaks is used — no output acks, which bb before 0.46 answers by closing
 the socket — so the `engines` floor is unchanged. On bb 0.35, which cannot
-resume an attach, or when the socket closes three times in a row without
-holding (a proxy that refuses the upgrade), that tab falls back to the plugin
-RPC, where `lib/pump.ts` polls: 40 ms while bytes are moving, backing off to
-320 ms when the shell is quiet, and every 2 s for a background tab. Resizes
-always go over the RPC: bb takes a socket resize only from the session's most
-recently attached socket, so with a tab open on two devices the other one's
-would be dropped.
+resume an attach, a tab uses the plugin RPC instead. So does a tab whose
+socket closes three times in a row without holding (a proxy that refuses the
+upgrade, or bb restarting), but that one tries the socket again every 30 s and
+whenever its window is shown. On the RPC, `lib/pump.ts` polls: 40 ms while
+bytes are moving, backing off to 320 ms when the shell is quiet, and every 2 s
+for a background tab. Resizes go over the RPC, apart from one sent up the
+socket on attach by a tab that has been on screen: bb takes a socket resize
+only from the session's most recently attached socket, so with a tab open on
+two devices the other one's would be dropped.
 
 **The server owns the tab list; the client owns status and focus.** Every
 response carrying tab state is a `{ revision, tabs, activeTabId }` snapshot, and
