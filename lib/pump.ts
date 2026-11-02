@@ -32,7 +32,7 @@ import {
   encodeInputChunks,
   normalizeTerminalTitle,
 } from "./terminal-io";
-import { TerminalSocket, terminalSocketUrl } from "./socket";
+import { planAttach, TerminalSocket, terminalSocketUrl } from "./socket";
 import { arrowSequence, controlCode, isTabCycleKey, windowChord } from "./keys";
 import { consumeScrollPixels } from "./scroll";
 import { resolveMonoFont, resolveTerminalTheme } from "./theme";
@@ -833,18 +833,12 @@ export class TerminalPump {
       this.stopPolling();
     }
     this.socketAttachedAt = Date.now();
-    const fresh = this.nextSeq === 0;
-    if (!fresh && info.replayStartSeq > this.nextSeq) {
-      // The ring buffer wrapped past our cursor while we were away; redraw
-      // from what is retained rather than splicing a hole into scrollback.
-      this.terminal.reset();
-    }
-    if (fresh || info.replayStartSeq > this.nextSeq) {
-      this.replayUntilSeq = info.nextSeq;
-      this.nextSeq = info.replayStartSeq;
-    } else {
-      this.replayUntilSeq = null;
-    }
+    const plan = planAttach(this.nextSeq, info.replayStartSeq, info.nextSeq);
+    // The ring buffer wrapped past our cursor while we were away; redraw from
+    // what is retained rather than splicing a hole into scrollback.
+    if (plan.reset) this.terminal.reset();
+    this.nextSeq = plan.cursor;
+    this.replayUntilSeq = plan.replayUntilSeq;
     if (info.session.status === "running" || info.session.status === "starting") {
       this.setStatus("live");
     }

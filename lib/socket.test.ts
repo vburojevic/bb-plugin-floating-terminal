@@ -6,6 +6,7 @@
 // up on and polled instead.
 import { describe, expect, it, vi } from "vitest";
 import {
+  planAttach,
   TerminalSocket,
   terminalSocketUrl,
   type SocketLike,
@@ -74,6 +75,46 @@ describe("terminalSocketUrl", () => {
     expect(
       terminalSocketUrl({ protocol: "http:", host: "h" }, "t", 0),
     ).not.toContain("outputAcks");
+  });
+});
+
+describe("planAttach", () => {
+  it("replays what the session retained into a tab that has written nothing", () => {
+    expect(planAttach(0, 120, 500)).toEqual({
+      reset: false,
+      cursor: 120,
+      replayUntilSeq: 500,
+    });
+  });
+
+  it("has nothing to mute when a fresh session has no output yet", () => {
+    expect(planAttach(0, 0, 0)).toEqual({ reset: false, cursor: 0, replayUntilSeq: null });
+  });
+
+  it("resumes where the tab left off, treating what follows as new output", () => {
+    expect(planAttach(500, 500, 500)).toEqual({
+      reset: false,
+      cursor: 500,
+      replayUntilSeq: null,
+    });
+  });
+
+  it("keeps a cursor that polling moved on while the socket was connecting", () => {
+    // Asked for 500, but polls wrote up to 520 before the attach landed:
+    // chunks 500 to 519 are skipped rather than written twice.
+    expect(planAttach(520, 500, 530)).toEqual({
+      reset: false,
+      cursor: 520,
+      replayUntilSeq: null,
+    });
+  });
+
+  it("resets and redraws when the ring buffer moved past the cursor", () => {
+    expect(planAttach(500, 900, 1200)).toEqual({
+      reset: true,
+      cursor: 900,
+      replayUntilSeq: 1200,
+    });
   });
 });
 

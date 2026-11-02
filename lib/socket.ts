@@ -84,6 +84,38 @@ export function terminalSocketUrl(
   return `${scheme}//${location.host}/ws/terminals/${id}?sinceSeq=${sinceSeq}`;
 }
 
+export interface AttachPlan {
+  /** The ring buffer moved past the cursor: clear the terminal and redraw. */
+  reset: boolean;
+  /** The seq to write from next; chunks below it were already written. */
+  cursor: number;
+  /** Chunks below this are retained output being replayed, written muted. */
+  replayUntilSeq: number | null;
+}
+
+/**
+ * How to take up a stream the server just attached. `cursor` is the seq the
+ * terminal has written up to, 0 for nothing yet; the rest is what `attached`
+ * said.
+ */
+export function planAttach(
+  cursor: number,
+  replayStartSeq: number,
+  nextSeq: number,
+): AttachPlan {
+  const fresh = cursor === 0;
+  const wrapped = !fresh && replayStartSeq > cursor;
+  if (!fresh && !wrapped) {
+    // Resuming: everything at or past the cursor is new output.
+    return { reset: false, cursor, replayUntilSeq: null };
+  }
+  return {
+    reset: wrapped,
+    cursor: replayStartSeq,
+    replayUntilSeq: nextSeq > replayStartSeq ? nextSeq : null,
+  };
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null
     ? (value as Record<string, unknown>)
