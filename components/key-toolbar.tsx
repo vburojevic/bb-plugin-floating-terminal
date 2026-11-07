@@ -28,6 +28,14 @@ export function KeyToolbar({ ctrlArmed, onKey }: KeyToolbarProps) {
       role="toolbar"
       aria-label="Terminal keys"
       data-no-drag=""
+      // iOS moves focus on the click a tap synthesizes after touchend, which
+      // preventDefault on pointerdown does not cancel: every key blurred the
+      // terminal and the keyboard went down. Cancelling touchend drops that
+      // click. The keys fire on pointer events, so none of them needs it, and a
+      // touch that scrolled the bar ends uncancelable and is left alone.
+      onTouchEnd={(event) => {
+        if (event.cancelable) event.preventDefault();
+      }}
     >
       {TOOLBAR_KEYS.map((key) => {
         const armed = key.id === "ctrl" && ctrlArmed;
