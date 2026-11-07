@@ -390,9 +390,9 @@ fonts/nerd-symbols.css        generated: the Nerd Font symbol set, inlined
 
 ```mermaid
 flowchart LR
-  xterm["xterm<br>(one tab)"] <--> pump["TerminalPump<br>lib/pump.ts"]
-  pump <-->|"keystrokes up, output pushed down<br>/ws/terminals/:id"| pty[("bb terminal<br>session (PTY)")]
-  pump -.->|"fallback: write + output polls<br>plugin RPC"| server["server.ts"]
+  xterm["xterm"] <--> pump["TerminalPump"]
+  pump <-->|"socket"| pty[("PTY")]
+  pump -.->|"RPC fallback"| server["server.ts"]
   server -.-> pty
 ```
 
