@@ -12,8 +12,8 @@
 // when the socket is not on offer at all, belong to the pump; this only speaks
 // the wire protocol and reports what happened.
 //
-// Only the parts of the protocol every bb since 0.36 speaks are used, so the
-// plugin's `engines.bb` floor stays where it is:
+// Only the parts of the protocol every bb since 0.36 speaks are used (the
+// plugin itself now needs bb 0.49, for the @get-bb/plugin-sdk runtime):
 //   - `sinceSeq` and `attached.replayStartSeq` arrived in 0.36. A 0.35 server
 //     attaches without `replayStartSeq`, which is reported as null and makes
 //     the pump poll instead.

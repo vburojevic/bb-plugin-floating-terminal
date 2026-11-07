@@ -19,7 +19,7 @@
 //     The client applies a snapshot only if it is newer than the last one it
 //     applied, so a slow `init` can never resurrect a closed tab or drop a
 //     freshly opened one just because it started earlier.
-import { defineRpcContract, type BbPluginApi } from "@bb/plugin-sdk";
+import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { worktreeLabel } from "./lib/scopes";
 import { meaningfulShellTitle } from "./lib/terminal-io";
 import { z } from "zod";

@@ -4,7 +4,7 @@
 // tab switches; inactive tabs are display:none and poll slowly (or not at all
 // while the window is hidden), so a tab you are not looking at costs little.
 import { useEffect, useRef } from "react";
-import type { PluginRpcClient } from "@bb/plugin-sdk/app";
+import type { PluginRpcClient } from "@get-bb/plugin-sdk/app";
 import { TerminalPump, type PumpMode } from "@/lib/pump";
 import type { TabStatus } from "@/lib/tabs";
 import type { rpcContract } from "../server";

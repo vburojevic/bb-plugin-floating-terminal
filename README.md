@@ -14,7 +14,7 @@ again — the shells keep running.
 bb plugin install git:https://github.com/vburojevic/bb-plugin-floating-terminal
 ```
 
-Requires bb >= 0.35. No keys, no setup — the button appears in the sidebar
+Requires bb >= 0.49. No keys, no setup — the button appears in the sidebar
 footer next to Settings the moment it lands.
 
 ## What it does
@@ -234,9 +234,7 @@ root into `document.body`, outside bb's component tree, so `useRpc`,
 plugin RPC wire format (`POST /api/v1/plugins/<id>/rpc/<method>`) directly and
 is typed off the same `rpcContract`. What the window needs from bb's context —
 which thread is in view, which composers are on screen — two invisible app
-overlays read and report into `lib/controller.ts`. Everything newer than the
-vendored SDK types is feature-detected, so on an older bb those parts are
-simply absent.
+overlays read and report into `lib/controller.ts`.
 
 **Everything the window portals must stack above it.** Menus, the phone
 drawer and tooltips render outside the window, at the end of `<body>`. The
@@ -254,12 +252,10 @@ same page on the same machine, that took a keystroke's echo from a median of
 ~55 ms (an HTTP write, then waiting for the next 40 ms poll) to ~10 ms. Every
 tab in an open window holds one, none are held while the window is hidden,
 and a reconnect resumes from the last byte written. Only what every bb since
-0.36 speaks is used — no output acks, which bb before 0.46 answers by closing
-the socket — so the `engines` floor is unchanged. On bb 0.35, which cannot
-resume an attach, a tab uses the plugin RPC instead. So does a tab whose
+0.36 speaks is used, with no output acks. A tab whose
 socket closes three times in a row without holding (a proxy that refuses the
-upgrade, or bb restarting), but that one tries the socket again every 30 s and
-whenever its window is shown. On the RPC, `lib/pump.ts` polls: 40 ms while
+upgrade, or bb restarting) uses the plugin RPC instead, and tries the socket
+again every 30 s and whenever its window is shown. On the RPC, `lib/pump.ts` polls: 40 ms while
 bytes are moving, backing off to 320 ms when the shell is quiet, and every 2 s
 for a background tab. Resizes go over the RPC, apart from one sent up the
 socket on attach by a tab that has been on screen: bb takes a socket resize

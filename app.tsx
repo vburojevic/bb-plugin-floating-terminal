@@ -12,13 +12,17 @@
 //   Keyboard;
 // - "Paste into terminal" on chat messages and selections.
 //
-// Everything newer than the vendored SDK types is feature-detected, so the
-// plugin still loads on an older bb with those parts simply absent. All of it
-// drives the same external controller, so nothing depends on mount order.
-import { createElement, useEffect, type ComponentType } from "react";
+// All of it drives the same external controller, so nothing depends on mount
+// order.
+import { createElement, useEffect } from "react";
 import { createRoot } from "react-dom/client";
-import * as SdkApp from "@bb/plugin-sdk/app";
-import { definePluginApp, useBbContext } from "@bb/plugin-sdk/app";
+import {
+  definePluginApp,
+  useBbContext,
+  useComposers,
+  type PluginCommandContext,
+  type PluginCommandRegistration,
+} from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 import { FloatingTerminal } from "@/components/floating-terminal";
 import { commandFromSelection, extractCommand } from "@/lib/commands";
@@ -31,33 +35,6 @@ import {
 } from "@/lib/controller";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
-
-interface CommandContext {
-  threadId: string | null;
-  projectId: string | null;
-}
-
-interface CommandRegistration {
-  id: string;
-  title: string;
-  isAvailable?: (context: CommandContext) => boolean;
-  run: (context: CommandContext) => void;
-}
-
-/** What this plugin uses of the app API beyond the vendored declarations. */
-interface AppExtras {
-  commands?: { register(registration: CommandRegistration): void };
-  slots: {
-    experimental_appOverlay?: (registration: {
-      id: string;
-      component: ComponentType;
-    }) => void;
-  };
-}
-
-const useComposers = (SdkApp as unknown as {
-  useComposers?: () => readonly ComposerHandle[];
-}).useComposers;
 
 /** Reports the route, so "here" can mean the thread's own worktree. */
 function ContextBridge() {
@@ -72,7 +49,7 @@ function ContextBridge() {
 
 /** Reports the composers on screen, so output can be handed to the agent. */
 function ComposerBridge() {
-  const composers = useComposers!();
+  const composers: readonly ComposerHandle[] = useComposers();
   useEffect(() => {
     composerBridge.set(composers);
   }, [composers]);
@@ -80,13 +57,11 @@ function ComposerBridge() {
   return null;
 }
 
-function contextOf(command: CommandContext): HostContext {
+function contextOf(command: PluginCommandContext): HostContext {
   return { projectId: command.projectId ?? null, threadId: command.threadId ?? null };
 }
 
 export default definePluginApp((app) => {
-  const extras = app as unknown as AppExtras;
-
   app.contentScripts.register({
     id: "floating-window",
     mount({ signal }) {
@@ -119,12 +94,10 @@ export default definePluginApp((app) => {
 
   // Separate overlays, so a host change that breaks one hook cannot take the
   // other down with it: bb contains a crash to the overlay that threw.
-  extras.slots.experimental_appOverlay?.({ id: "context", component: ContextBridge });
-  if (typeof useComposers === "function") {
-    extras.slots.experimental_appOverlay?.({ id: "composers", component: ComposerBridge });
-  }
+  app.slots.experimental_appOverlay({ id: "context", component: ContextBridge });
+  app.slots.experimental_appOverlay({ id: "composers", component: ComposerBridge });
 
-  const commands: CommandRegistration[] = [
+  const commands: PluginCommandRegistration[] = [
     {
       id: "toggle",
       title: "Floating Terminal: Show or hide",
@@ -160,11 +133,10 @@ export default definePluginApp((app) => {
       run: () => windowController.dispatch({ kind: "restart" }),
     },
   ];
-  for (const command of commands) extras.commands?.register(command);
+  for (const command of commands) app.commands.register(command);
 
   // The command lands at the prompt and waits for Enter: an agent's
   // suggestion is something to read before it runs, not to run for you.
-  if (typeof app.slots.messageAction !== "function") return;
   app.slots.messageAction({
     id: "paste-into-terminal",
     title: "Paste into terminal",
