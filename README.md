@@ -221,7 +221,7 @@ lib/frame.ts                  drag, resize, clamping, persistence
 lib/theme.ts                  bb's oklch tokens -> an xterm palette
 lib/rpc.ts                    fetch twin of the useRpc hook
 lib/commands.ts               message text -> a command; output -> the composer
-lib/host.ts                   feature-detected host APIs (bb's clipboard)
+lib/host.ts                   bb's clipboard writer
 lib/prefs.ts                  the per-device text size
 fonts/nerd-symbols.css        generated: the Nerd Font symbol set, inlined
 ```

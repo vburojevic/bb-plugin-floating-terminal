@@ -397,8 +397,8 @@ export function FloatingTerminal() {
   );
 
   /**
-   * A shell where the person is. With nothing to go on — a settings page, a
-   * bb too old to report its route — the picker opens instead of guessing.
+   * A shell where the person is. With nothing to go on (a settings page), the
+   * picker opens instead of guessing.
    */
   const openHere = useCallback(
     async (where: HostContext): Promise<string | null> => {
