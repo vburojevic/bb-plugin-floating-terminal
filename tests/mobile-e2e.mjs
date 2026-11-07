@@ -35,11 +35,10 @@ const fail = (n, d = "") => results.push({ s: "FAIL", n, d });
 const skip = (n, d = "") => results.push({ s: "SKIP", n, d });
 const check = (n, ok, d = "") => (ok ? pass(n, d) : fail(n, d));
 
-// The `bb` CLI targets the default bb unless told otherwise, so a run pointed
-// at another bb has to take the CLI with it: otherwise it types into, and
-// counts the shells of, the bb you work in.
-const shEnv = process.env.BB_APP_URL ? { ...process.env, BB_SERVER_URL: APP } : process.env;
-const sh = (c) => execSync(c, { encoding: "utf8", env: shEnv }).trim();
+// The `bb` CLI follows BB_SERVER_URL (or its default), not the page, so it is
+// pointed at the bb the browser drives: otherwise it types into, and counts
+// the shells of, a different bb.
+const sh = (c) => execSync(c, { encoding: "utf8", env: { ...process.env, BB_SERVER_URL: APP } }).trim();
 /** Bytes the pty has emitted since `seq`; a pager redrawing is the only signal
  *  that a swipe reached it, since input does not stamp the session record. */
 const outputSince = (id, seq) => {
