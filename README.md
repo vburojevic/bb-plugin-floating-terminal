@@ -1,6 +1,6 @@
 <h1 align="center">Floating Terminal</h1>
 
-<p align="center"><b>A real terminal that floats over bb.</b><br>Open it from the sidebar footer or <kbd>Ctrl</kbd> <kbd>&#96;</kbd>, run whatever you need next to the agent that is working,<br>and hide it again. The shells keep running.</p>
+<p align="center"><b>A real terminal that floats over bb.</b><br>Open it from the sidebar footer or <kbd>Ctrl</kbd> <kbd>&#96;</kbd>, run whatever you need next to the agent that is working, and hide it again. The shells keep running.</p>
 
 <p align="center">
 <a href="https://github.com/vburojevic/bb-plugin-floating-terminal/releases/latest"><img src="https://img.shields.io/github/v/release/vburojevic/bb-plugin-floating-terminal?style=flat-square&label=release&color=57606a" alt="Latest release"></a>
