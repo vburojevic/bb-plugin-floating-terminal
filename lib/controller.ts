@@ -96,8 +96,8 @@ const contextListeners = new Set<Listener>();
 /**
  * The route the person is on, reported by a tiny app overlay that can read
  * bb's React context — which the window, mounted by a content script, cannot.
- * Stays at nulls on a bb too old to offer the overlay; everything that reads
- * it treats "unknown" as "nowhere in particular".
+ * Stays at nulls where the route names no thread or project; everything that
+ * reads it treats "unknown" as "nowhere in particular".
  */
 export const hostContext = {
   get: (): HostContext => context,

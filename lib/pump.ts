@@ -24,7 +24,7 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
-import type { PluginRpcClient } from "@bb/plugin-sdk/app";
+import type { PluginRpcClient } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "../server";
 import type { TabStatus } from "./tabs";
 import {
