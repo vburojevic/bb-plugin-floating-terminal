@@ -5,7 +5,7 @@
 //
 // This is not part of `npm test`: it needs a real bb on the other end, and it
 // opens and closes real shells there (it asserts it leaves none behind). Point
-// it somewhere else with BB_APP_URL.
+// it somewhere else with BB_APP_URL; the `bb` commands it runs follow it there.
 //
 // It is safe to run against the bb you work in: it only ever types into, and
 // closes, the shell it opened itself. With shells already open the empty-state
@@ -35,7 +35,10 @@ const fail = (n, d = "") => results.push({ s: "FAIL", n, d });
 const skip = (n, d = "") => results.push({ s: "SKIP", n, d });
 const check = (n, ok, d = "") => (ok ? pass(n, d) : fail(n, d));
 
-const sh = (c) => execSync(c, { encoding: "utf8" }).trim();
+// The `bb` CLI follows BB_SERVER_URL (or its default), not the page, so it is
+// pointed at the bb the browser drives: otherwise it types into, and counts
+// the shells of, a different bb.
+const sh = (c) => execSync(c, { encoding: "utf8", env: { ...process.env, BB_SERVER_URL: APP } }).trim();
 /** Bytes the pty has emitted since `seq`; a pager redrawing is the only signal
  *  that a swipe reached it, since input does not stamp the session record. */
 const outputSince = (id, seq) => {
@@ -210,10 +213,16 @@ if (empty === null) {
 } else {
 check("empty state heading visible", empty.heading === "Start a shell" && empty.headingVisible);
 check("directory list stays inside the sheet", empty.listInside);
+// A group with nothing left in it is not rendered: on a bb with one machine
+// whose home is already in Recent, there is no Machines group at all. What
+// must hold is the order of the groups that are there.
+const ORDER = ["Recent", "Projects", "Machines"];
 const groups = empty.groups.filter((g) => g !== "Here");
 check("groups ordered Recent -> Projects -> Machines",
-  JSON.stringify(groups) === JSON.stringify(["Recent", "Projects", "Machines"]) ||
-  JSON.stringify(groups) === JSON.stringify(["Projects", "Machines"]), empty.groups.join(" > "));
+  groups.length > 0 &&
+  groups.every((g) => ORDER.includes(g)) &&
+  groups.every((g, i) => i === 0 || ORDER.indexOf(groups[i - 1]) < ORDER.indexOf(g)),
+  empty.groups.join(" > "));
 
 if (cdp && empty.listScrollable) {
   const lb = await term.locator("[cmdk-list]").boundingBox();
