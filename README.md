@@ -235,7 +235,7 @@ search field.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/media/dark/phone.png">
-  <img alt="The terminal as a full-screen sheet on an iPhone, with the key bar along the bottom" src="docs/media/light/phone.png" width="100%">
+  <img alt="The terminal as a sheet on a phone, with the key bar along the bottom" src="docs/media/light/phone.png" width="100%">
 </picture>
 
 </td>
@@ -364,10 +364,14 @@ app.tsx                       contentScript (React root), sidebar button, palett
     ├── window-menu.tsx       the ⋯ menu
     ├── terminal-overlays.tsx right-click menu, shortcut sheet, pills
     ├── find-bar.tsx          find in scrollback
+    ├── key-toolbar.tsx       the phone sheet's key bar
     └── terminal-view.tsx     one tab's terminal; owns a TerminalPump
 
 server.ts                     RPC over bb.sdk.terminals; tab list in kv
 lib/pump.ts                   one xterm <-> one PTY
+lib/socket.ts                 bb's /ws/terminals socket (RPC is the fallback)
+lib/late-ime-input.ts         iOS input xterm drops after a 229 keydown
+lib/portal-scope.ts           tags portaled overlays for the plugin's CSS
 lib/tabs.ts                   pure reducer for the tab strip
 lib/terminal-io.ts            input chunking, shell-title filtering
 lib/keys.ts                   the on-screen key bar's sequences
@@ -386,14 +390,14 @@ fonts/nerd-symbols.css        generated: the Nerd Font symbol set, inlined
 </details>
 
 <details>
-<summary><b>How a keystroke reaches the shell</b></summary>
+<summary><b>How bytes reach the shell and back</b></summary>
 
 ```mermaid
 flowchart LR
   xterm["xterm"] <--> pump["TerminalPump"]
   pump <-->|"socket"| pty[("PTY")]
-  pump -.->|"RPC fallback"| server["server.ts"]
-  server -.-> pty
+  pump <-.->|"RPC fallback"| server["server.ts"]
+  server <-.-> pty
 ```
 
 **Output is streamed over bb's own terminal socket, polled only as a
@@ -436,7 +440,7 @@ turns pointer events off on everything else, so `elementFromPoint` sees straight
 through the window. Compare z-indices, or look at a screenshot.
 
 **Output is streamed over bb's own terminal socket, polled only as a
-fallback.** See *How a keystroke reaches the shell* above.
+fallback.** See *How bytes reach the shell and back* above.
 
 **The server owns the tab list; the client owns status and focus.** Every
 response carrying tab state is a `{ revision, tabs, activeTabId }` snapshot, and
